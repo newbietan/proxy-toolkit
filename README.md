@@ -24,6 +24,8 @@ xray-setup.sh status      # 查看服务状态
 xray-setup.sh show        # 显示节点信息和分享链接
 xray-setup.sh restart     # 重启服务
 xray-setup.sh update      # 更新 Xray-core
+xray-setup.sh bbr         # 开启 BBR 拥塞控制
+xray-setup.sh icmp        # 开启 ICMP (允许 ping)
 ```
 
 ## 安装完成后
@@ -116,6 +118,8 @@ proxies:
 - **端口占用**: 自动检测并停止占用 443 端口的服务（nginx/apache 等）
 - **Init 系统**: 自动检测 systemd/OpenRC，无 systemd 时使用 nohup 兼容模式
 - **开机启动**: 自动配置开机启动（支持所有 init 系统）
+- **BBR**: 自动开启 BBR 拥塞控制，提升网络性能
+- **ICMP**: 自动开启 ICMP，允许 ping 测试
 
 ## 常见问题
 

@@ -346,6 +346,78 @@ is_running() {
     esac
 }
 
+# ==================== 系统优化 ====================
+
+# 开启 BBR
+enable_bbr() {
+    log_info "配置 BBR 拥塞控制..."
+
+    # 检查内核版本
+    local kernel_ver=$(uname -r | cut -d. -f1,2)
+    local major=$(echo $kernel_ver | cut -d. -f1)
+    local minor=$(echo $kernel_ver | cut -d. -f2)
+
+    if [[ $major -lt 4 ]] || [[ $major -eq 4 && $minor -lt 9 ]]; then
+        log_warn "内核版本 ${kernel_ver} 不支持 BBR，需要 >= 4.9"
+        return 1
+    fi
+
+    # 检查当前状态
+    local current_cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+    if [[ "$current_cc" == "bbr" ]]; then
+        log_info "BBR 已启用"
+        return 0
+    fi
+
+    # 检查 BBR 模块是否可用
+    if ! modprobe tcp_bbr 2>/dev/null; then
+        log_warn "BBR 模块不可用"
+        return 1
+    fi
+
+    # 配置 BBR
+    cat > /etc/sysctl.d/99-bbr.conf <<EOF
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+EOF
+
+    sysctl -p /etc/sysctl.d/99-bbr.conf >/dev/null 2>&1
+
+    # 验证
+    current_cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+    if [[ "$current_cc" == "bbr" ]]; then
+        log_info "BBR 启用成功"
+        return 0
+    else
+        log_warn "BBR 启用失败"
+        return 1
+    fi
+}
+
+# 开启 ICMP (允许 ping)
+enable_icmp() {
+    log_info "配置 ICMP (允许 ping)..."
+
+    local current=$(cat /proc/sys/net/ipv4/icmp_echo_ignore_all 2>/dev/null)
+    if [[ "$current" == "0" ]]; then
+        log_info "ICMP 已启用"
+        return 0
+    fi
+
+    # 开启 ICMP
+    echo 0 > /proc/sys/net/ipv4/icmp_echo_ignore_all
+
+    # 持久化
+    cat > /etc/sysctl.d/99-icmp.conf <<EOF
+net.ipv4.icmp_echo_ignore_all = 0
+EOF
+
+    sysctl -p /etc/sysctl.d/99-icmp.conf >/dev/null 2>&1
+
+    log_info "ICMP 启用成功"
+    return 0
+}
+
 # ==================== 核心功能 ====================
 
 # 安装 Xray-core
@@ -650,6 +722,8 @@ show_usage() {
     echo "  show        显示节点信息和分享链接"
     echo "  restart     重启服务"
     echo "  update      更新 Xray-core"
+    echo "  bbr         开启 BBR 拥塞控制"
+    echo "  icmp        开启 ICMP (允许 ping)"
     echo "  help        显示此帮助信息"
     echo ""
 }
@@ -666,11 +740,21 @@ main() {
             echo -e "${CYAN}============================================${NC}"
             echo ""
             install_deps
+            enable_bbr
+            enable_icmp
             check_port 443
             install_xray
             generate_config
             install_service
             show_info
+            ;;
+        bbr)
+            check_root
+            enable_bbr
+            ;;
+        icmp)
+            check_root
+            enable_icmp
             ;;
         uninstall)
             check_root
