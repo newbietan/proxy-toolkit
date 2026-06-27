@@ -170,6 +170,24 @@ generate_short_id() {
     openssl rand -hex 8
 }
 
+# 生成 TLS 证书（CDN 模式用）
+generate_tls_cert() {
+    local domain="$1"
+    local cert_dir="${XRAY_CONFIG_DIR}/certs"
+
+    mkdir -p "${cert_dir}"
+
+    # 生成自签名证书（有效期 10 年）
+    openssl req -x509 -nodes -days 3650 \
+        -newkey rsa:2048 \
+        -keyout "${cert_dir}/private.key" \
+        -out "${cert_dir}/cert.pem" \
+        -subj "/CN=${domain}" \
+        -addext "subjectAltName=DNS:${domain}" 2>/dev/null
+
+    echo "${cert_dir}"
+}
+
 # 选择部署模式
 select_mode() {
     echo "" >&2
@@ -621,12 +639,17 @@ generate_config() {
         }"
     fi
 
-    # CDN 模式 (WebSocket)
+    # CDN 模式 (WebSocket + TLS)
     if [[ "$mode" == "cdn" || "$mode" == "both" ]]; then
         local ws_port=8080
         if [[ "$mode" == "cdn" ]]; then
             ws_port=443
         fi
+
+        # 生成 TLS 证书
+        log_info "为域名 ${domain} 生成 TLS 证书..."
+        local cert_dir=$(generate_tls_cert "${domain}")
+        log_info "证书已生成到 ${cert_dir}"
 
         if [[ -n "$inbounds" ]]; then
             inbounds="${inbounds},"
@@ -647,6 +670,15 @@ generate_config() {
             },
             \"streamSettings\": {
                 \"network\": \"ws\",
+                \"security\": \"tls\",
+                \"tlsSettings\": {
+                    \"certificates\": [
+                        {
+                            \"certificateFile\": \"${cert_dir}/cert.pem\",
+                            \"keyFile\": \"${cert_dir}/private.key\"
+                        }
+                    ]
+                },
                 \"wsSettings\": {
                     \"path\": \"/vless\"
                 }
@@ -864,11 +896,12 @@ show_info() {
         echo -e "  ${BLUE}路径:${NC}   /vless"
         echo -e "  ${BLUE}TLS:${NC}    开启"
         echo -e "  ${BLUE}SNI:${NC}    ${cdn_address}"
+        echo -e "  ${BLUE}证书:${NC}   ${XRAY_CONFIG_DIR}/certs/"
         echo ""
         echo -e "${YELLOW}Cloudflare 配置:${NC}"
         echo -e "  1. 添加 A 记录指向 ${SERVER_IP}"
         echo -e "  2. 开启橙色云朵（代理）"
-        echo -e "  3. SSL/TLS 设置为 Full"
+        echo -e "  3. SSL/TLS 设置为 Full（不选 Strict）"
         if [[ "$mode" == "both" ]]; then
             echo -e "  4. 回源端口: ${ws_port}"
         fi
