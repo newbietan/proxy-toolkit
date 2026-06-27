@@ -97,26 +97,31 @@ check_port() {
     local port="${1:-443}"
     log_info "检查端口 ${port} 占用情况..."
 
-    # 查找占用端口的进程
+    # 方法1: 尝试直接绑定端口测试是否可用
+    if command -v nc &>/dev/null; then
+        if nc -z -w1 127.0.0.1 ${port} 2>/dev/null; then
+            log_warn "端口 ${port} 已被占用"
+        else
+            log_info "端口 ${port} 可用"
+            return 0
+        fi
+    fi
+
+    # 方法2: 查找占用端口的进程（排除 PID 1）
     local pid=""
     local process_name=""
 
     if command -v lsof &>/dev/null; then
-        pid=$(lsof -ti:${port} 2>/dev/null | head -1)
+        pid=$(lsof -ti:${port} 2>/dev/null | grep -v "^1$" | head -1)
     elif command -v ss &>/dev/null; then
-        # 兼容 Alpine Linux (busybox ss)
-        local ss_output=$(ss -tlnp "sport = :${port}" 2>/dev/null)
-        if echo "$ss_output" | grep -qE "LISTEN.*:${port}"; then
-            pid=$(echo "$ss_output" | grep -oP 'pid=\K[0-9]+' | head -1)
+        # 兼容 Alpine Linux (busybox ss) - 使用更宽松的匹配
+        local ss_output=$(ss -tlnp 2>/dev/null | grep ":${port} " || true)
+        if [[ -n "$ss_output" ]]; then
+            # 尝试提取 PID，跳过 PID 1
+            pid=$(echo "$ss_output" | grep -oP 'pid=\K[0-9]+' | grep -v "^1$" | head -1)
         fi
     elif command -v netstat &>/dev/null; then
-        pid=$(netstat -tlnp 2>/dev/null | grep ":${port} " | awk '{print $7}' | cut -d'/' -f1 | head -1)
-    fi
-
-    # 跳过 PID 1 (init 进程) - Alpine Linux 误判
-    if [[ "$pid" == "1" ]]; then
-        log_info "端口 ${port} 可用"
-        return 0
+        pid=$(netstat -tlnp 2>/dev/null | grep ":${port} " | awk '{print $7}' | cut -d'/' -f1 | grep -v "^1$" | head -1)
     fi
 
     if [[ -n "$pid" ]]; then
