@@ -170,6 +170,57 @@ generate_short_id() {
     openssl rand -hex 8
 }
 
+# 选择部署模式
+select_mode() {
+    echo ""
+    echo -e "${CYAN}============================================${NC}"
+    echo -e "${GREEN}  选择部署模式${NC}"
+    echo -e "${CYAN}============================================${NC}"
+    echo ""
+    echo -e "  ${BLUE}1)${NC} 直连模式 (VLESS + Reality)"
+    echo -e "     - 速度快、延迟低、伪装强"
+    echo -e "     - 需要服务器 IP 稳定"
+    echo ""
+    echo -e "  ${BLUE}2)${NC} CDN 模式 (VLESS + WebSocket + Cloudflare)"
+    echo -e "     - 隐藏源站 IP、抗封锁"
+    echo -e "     - 速度稍慢、需要域名"
+    echo ""
+    echo -e "  ${BLUE}3)${NC} 双模式 (同时部署直连 + CDN)"
+    echo -e "     - 两种方式都支持"
+    echo -e "     - 推荐：主用直连，CDN 备用"
+    echo ""
+    read -p "请选择模式 [1/2/3]: " mode_choice
+
+    case "$mode_choice" in
+        1) echo "direct" ;;
+        2) echo "cdn" ;;
+        3) echo "both" ;;
+        *) echo "direct" ;;
+    esac
+}
+
+# 获取域名（CDN 模式用）
+get_domain() {
+    echo ""
+    echo -e "${CYAN}--------------------------------------------${NC}"
+    echo -e "${GREEN}  CDN 模式配置${NC}"
+    echo -e "${CYAN}--------------------------------------------${NC}"
+    echo ""
+    echo -e "${YELLOW}请确保已完成以下步骤：${NC}"
+    echo -e "  1. 拥有一个域名（如 example.com）"
+    echo -e "  2. 域名 NS 已切换到 Cloudflare"
+    echo -e "  3. 在 Cloudflare 添加了 A 记录指向本机 IP"
+    echo ""
+    read -p "请输入你的域名 (如 proxy.example.com): " domain
+
+    if [[ -z "$domain" ]]; then
+        log_error "域名不能为空"
+        exit 1
+    fi
+
+    echo "$domain"
+}
+
 # ==================== 服务管理 ====================
 
 # 安装 systemd 服务
@@ -498,6 +549,9 @@ install_xray() {
 
 # 生成配置
 generate_config() {
+    local mode="${1:-direct}"
+    local domain="${2:-}"
+
     log_info "生成配置..."
 
     mkdir -p "${XRAY_CONFIG_DIR}"
@@ -519,6 +573,93 @@ generate_config() {
         log_warn "无法自动获取服务器 IP，请手动替换配置中的 <YOUR_SERVER_IP>"
     fi
 
+    # 根据模式生成配置
+    local inbounds=""
+
+    # 直连模式 (Reality)
+    if [[ "$mode" == "direct" || "$mode" == "both" ]]; then
+        inbounds="${inbounds}
+        {
+            \"listen\": \"0.0.0.0\",
+            \"port\": 443,
+            \"protocol\": \"vless\",
+            \"settings\": {
+                \"clients\": [
+                    {
+                        \"id\": \"${uuid}\",
+                        \"flow\": \"xtls-rprx-vision\"
+                    }
+                ],
+                \"decryption\": \"none\"
+            },
+            \"streamSettings\": {
+                \"network\": \"tcp\",
+                \"security\": \"reality\",
+                \"realitySettings\": {
+                    \"show\": false,
+                    \"dest\": \"www.microsoft.com:443\",
+                    \"xver\": 0,
+                    \"serverNames\": [
+                        \"www.microsoft.com\"
+                    ],
+                    \"privateKey\": \"${private_key}\",
+                    \"shortIds\": [
+                        \"${short_id}\"
+                    ]
+                }
+            },
+            \"sniffing\": {
+                \"enabled\": true,
+                \"destOverride\": [
+                    \"http\",
+                    \"tls\",
+                    \"quic\"
+                ]
+            }
+        }"
+    fi
+
+    # CDN 模式 (WebSocket)
+    if [[ "$mode" == "cdn" || "$mode" == "both" ]]; then
+        local ws_port=8080
+        if [[ "$mode" == "cdn" ]]; then
+            ws_port=443
+        fi
+
+        if [[ -n "$inbounds" ]]; then
+            inbounds="${inbounds},"
+        fi
+
+        inbounds="${inbounds}
+        {
+            \"listen\": \"127.0.0.1\",
+            \"port\": ${ws_port},
+            \"protocol\": \"vless\",
+            \"settings\": {
+                \"clients\": [
+                    {
+                        \"id\": \"${uuid}\"
+                    }
+                ],
+                \"decryption\": \"none\"
+            },
+            \"streamSettings\": {
+                \"network\": \"ws\",
+                \"wsSettings\": {
+                    \"path\": \"/vless\"
+                }
+            },
+            \"sniffing\": {
+                \"enabled\": true,
+                \"destOverride\": [
+                    \"http\",
+                    \"tls\",
+                    \"quic\"
+                ]
+            }
+        }"
+    fi
+
     # 生成配置文件
     cat > "${XRAY_CONFIG}" <<EOF
 {
@@ -528,44 +669,7 @@ generate_config() {
         "error": "${XRAY_LOG}/error.log"
     },
     "inbounds": [
-        {
-            "listen": "0.0.0.0",
-            "port": 443,
-            "protocol": "vless",
-            "settings": {
-                "clients": [
-                    {
-                        "id": "${uuid}",
-                        "flow": "xtls-rprx-vision"
-                    }
-                ],
-                "decryption": "none"
-            },
-            "streamSettings": {
-                "network": "tcp",
-                "security": "reality",
-                "realitySettings": {
-                    "show": false,
-                    "dest": "www.microsoft.com:443",
-                    "xver": 0,
-                    "serverNames": [
-                        "www.microsoft.com"
-                    ],
-                    "privateKey": "${private_key}",
-                    "shortIds": [
-                        "${short_id}"
-                    ]
-                }
-            },
-            "sniffing": {
-                "enabled": true,
-                "destOverride": [
-                    "http",
-                    "tls",
-                    "quic"
-                ]
-            }
-        }
+        ${inbounds}
     ],
     "outbounds": [
         {
@@ -592,12 +696,14 @@ EOF
 
     # 保存安装信息
     cat > "${INSTALL_INFO}" <<EOF
+DEPLOY_MODE=${mode}
 UUID=${uuid}
 PRIVATE_KEY=${private_key}
 PUBLIC_KEY=${public_key}
 SHORT_ID=${short_id}
 SERVER_IP=${server_ip}
 SNI=www.microsoft.com
+DOMAIN=${domain}
 INSTALL_DATE="$(date '+%Y-%m-%d %H:%M:%S')"
 EOF
 
@@ -700,34 +806,84 @@ show_info() {
     fi
 
     source "${INSTALL_INFO}"
-
-    local share_link="vless://${UUID}@${SERVER_IP}:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#Xray-Reality"
+    local mode="${DEPLOY_MODE:-direct}"
 
     echo ""
     echo -e "${CYAN}============================================${NC}"
-    echo -e "${GREEN}  Xray VLESS Reality 节点信息${NC}"
+    echo -e "${GREEN}  Xray VLESS 节点信息${NC}"
     echo -e "${CYAN}============================================${NC}"
-    echo ""
-    echo -e "  ${BLUE}地址:${NC}   ${SERVER_IP}"
-    echo -e "  ${BLUE}端口:${NC}   443"
-    echo -e "  ${BLUE}UUID:${NC}   ${UUID}"
-    echo -e "  ${BLUE}密钥:${NC}   ${PUBLIC_KEY}"
-    echo -e "  ${BLUE}SNI:${NC}    ${SNI}"
-    echo -e "  ${BLUE}Flow:${NC}   xtls-rprx-vision"
-    echo -e "  ${BLUE}SID:${NC}    ${SHORT_ID}"
-    echo ""
-    echo -e "${CYAN}--------------------------------------------${NC}"
-    echo -e "${GREEN}分享链接:${NC}"
-    echo ""
-    echo -e "${share_link}"
-    echo ""
 
-    # 生成二维码（如果 qrencode 可用）
-    if command -v qrencode &>/dev/null; then
-        echo -e "${CYAN}--------------------------------------------${NC}"
-        echo -e "${GREEN}二维码:${NC}"
+    # 直连模式信息
+    if [[ "$mode" == "direct" || "$mode" == "both" ]]; then
+        local reality_link="vless://${UUID}@${SERVER_IP}:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#Xray-Reality"
+
         echo ""
-        qrencode -t ANSIUTF8 "${share_link}"
+        echo -e "${GREEN}[直连模式 - VLESS + Reality]${NC}"
+        echo ""
+        echo -e "  ${BLUE}地址:${NC}   ${SERVER_IP}"
+        echo -e "  ${BLUE}端口:${NC}   443"
+        echo -e "  ${BLUE}UUID:${NC}   ${UUID}"
+        echo -e "  ${BLUE}密钥:${NC}   ${PUBLIC_KEY}"
+        echo -e "  ${BLUE}SNI:${NC}    ${SNI}"
+        echo -e "  ${BLUE}Flow:${NC}   xtls-rprx-vision"
+        echo -e "  ${BLUE}SID:${NC}    ${SHORT_ID}"
+        echo ""
+        echo -e "${CYAN}--------------------------------------------${NC}"
+        echo -e "${GREEN}直连分享链接:${NC}"
+        echo ""
+        echo -e "${reality_link}"
+        echo ""
+
+        # 生成二维码（如果 qrencode 可用）
+        if command -v qrencode &>/dev/null; then
+            echo -e "${CYAN}--------------------------------------------${NC}"
+            echo -e "${GREEN}直连二维码:${NC}"
+            echo ""
+            qrencode -t ANSIUTF8 "${reality_link}"
+        fi
+    fi
+
+    # CDN 模式信息
+    if [[ "$mode" == "cdn" || "$mode" == "both" ]]; then
+        local cdn_address="${DOMAIN:-<YOUR_DOMAIN>}"
+        local ws_port=443
+        if [[ "$mode" == "both" ]]; then
+            ws_port=8080
+        fi
+        local ws_link="vless://${UUID}@${cdn_address}:443?encryption=none&security=tls&sni=${cdn_address}&fp=chrome&type=ws&host=${cdn_address}&path=%2Fvless#Xray-CDN"
+
+        echo ""
+        echo -e "${GREEN}[CDN 模式 - VLESS + WebSocket + Cloudflare]${NC}"
+        echo ""
+        echo -e "  ${BLUE}地址:${NC}   ${cdn_address}"
+        echo -e "  ${BLUE}端口:${NC}   443"
+        echo -e "  ${BLUE}UUID:${NC}   ${UUID}"
+        echo -e "  ${BLUE}传输:${NC}   ws"
+        echo -e "  ${BLUE}路径:${NC}   /vless"
+        echo -e "  ${BLUE}TLS:${NC}    开启"
+        echo -e "  ${BLUE}SNI:${NC}    ${cdn_address}"
+        echo ""
+        echo -e "${YELLOW}Cloudflare 配置:${NC}"
+        echo -e "  1. 添加 A 记录指向 ${SERVER_IP}"
+        echo -e "  2. 开启橙色云朵（代理）"
+        echo -e "  3. SSL/TLS 设置为 Full"
+        if [[ "$mode" == "both" ]]; then
+            echo -e "  4. 回源端口: ${ws_port}"
+        fi
+        echo ""
+        echo -e "${CYAN}--------------------------------------------${NC}"
+        echo -e "${GREEN}CDN 分享链接:${NC}"
+        echo ""
+        echo -e "${ws_link}"
+        echo ""
+
+        # 生成二维码（如果 qrencode 可用）
+        if command -v qrencode &>/dev/null; then
+            echo -e "${CYAN}--------------------------------------------${NC}"
+            echo -e "${GREEN}CDN 二维码:${NC}"
+            echo ""
+            qrencode -t ANSIUTF8 "${ws_link}"
+        fi
     fi
 
     echo ""
@@ -750,12 +906,16 @@ restart_service() {
 
 show_usage() {
     echo ""
-    echo -e "${CYAN}xray-setup${NC} - 极简 VLESS Reality 一键部署"
+    echo -e "${CYAN}xray-setup${NC} - 极简 VLESS 一键部署"
     echo ""
     echo "用法: $0 <命令>"
     echo ""
     echo "命令:"
     echo "  install     安装 Xray-core 并生成配置"
+    echo "              支持三种模式："
+    echo "                1. 直连模式 (VLESS + Reality)"
+    echo "                2. CDN 模式 (VLESS + WebSocket + Cloudflare)"
+    echo "                3. 双模式 (同时部署直连 + CDN)"
     echo "  uninstall   卸载 Xray-core"
     echo "  status      查看服务状态"
     echo "  show        显示节点信息和分享链接"
@@ -775,15 +935,31 @@ main() {
             check_root
             echo ""
             echo -e "${CYAN}============================================${NC}"
-            echo -e "${GREEN}  Xray VLESS Reality 一键安装${NC}"
+            echo -e "${GREEN}  Xray VLESS 一键安装${NC}"
             echo -e "${CYAN}============================================${NC}"
             echo ""
+
+            # 选择部署模式
+            local mode=$(select_mode)
+            local domain=""
+
+            # CDN 模式需要域名
+            if [[ "$mode" == "cdn" || "$mode" == "both" ]]; then
+                domain=$(get_domain)
+            fi
+
             install_deps
             enable_bbr
             enable_icmp
+
+            # 检查端口
             check_port 443
+            if [[ "$mode" == "both" ]]; then
+                check_port 8080
+            fi
+
             install_xray
-            generate_config
+            generate_config "$mode" "$domain"
             install_service
             configure_firewall
             show_info

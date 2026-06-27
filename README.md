@@ -1,6 +1,14 @@
 # xray-setup
 
-极简 VLESS Reality 一键部署脚本，单文件，无依赖。
+极简 VLESS 一键部署脚本，支持直连和 CDN 两种模式，单文件，无依赖。
+
+## 部署模式
+
+| 模式 | 协议 | 特点 | 适用场景 |
+|------|------|------|----------|
+| **直连模式** | VLESS + Reality | 速度快、延迟低、伪装强 | IP 稳定、追求性能 |
+| **CDN 模式** | VLESS + WebSocket + Cloudflare | 隐藏 IP、抗封锁 | IP 易被封、需要稳定 |
+| **双模式** | 同时部署直连 + CDN | 两种方式都支持 | 推荐：主用直连，CDN 备用 |
 
 ## 快速安装
 
@@ -15,10 +23,15 @@ chmod +x xray-setup.sh
 ./xray-setup.sh install
 ```
 
+安装时会提示选择部署模式，CDN 模式需要提前准备：
+1. 拥有一个域名
+2. 域名 NS 已切换到 Cloudflare
+3. 在 Cloudflare 添加 A 记录指向服务器 IP
+
 ## 命令
 
 ```bash
-xray-setup.sh install     # 安装 Xray-core 并生成配置
+xray-setup.sh install     # 安装 Xray-core 并生成配置（支持选择模式）
 xray-setup.sh uninstall   # 卸载 Xray-core
 xray-setup.sh status      # 查看服务状态
 xray-setup.sh show        # 显示节点信息和分享链接
@@ -33,7 +46,8 @@ xray-setup.sh icmp        # 开启 ICMP (允许 ping)
 运行 `install` 后会自动输出：
 
 - 服务器地址、端口、UUID
-- 公钥、Short ID
+- 公钥、Short ID（直连模式）
+- 域名、路径（CDN 模式）
 - VLESS 分享链接（可直接导入客户端）
 
 ## 客户端配置
@@ -44,6 +58,8 @@ xray-setup.sh icmp        # 开启 ICMP (允许 ping)
 2. 导入链接 → 更新订阅
 
 ### Clash Meta
+
+#### 直连模式 (Reality)
 
 ```yaml
 proxies:
@@ -63,7 +79,29 @@ proxies:
     client-fingerprint: chrome
 ```
 
+#### CDN 模式 (WebSocket)
+
+```yaml
+proxies:
+  - name: "Xray-CDN"
+    type: vless
+    server: <你的域名>
+    port: 443
+    uuid: <UUID>
+    network: ws
+    tls: true
+    udp: true
+    servername: <你的域名>
+    ws-opts:
+      path: /vless
+      headers:
+        Host: <你的域名>
+    client-fingerprint: chrome
+```
+
 ### Sing-box
+
+#### 直连模式 (Reality)
 
 ```json
 {
@@ -80,6 +118,29 @@ proxies:
       "enabled": true,
       "public_key": "<公钥>",
       "short_id": "<Short ID>"
+    }
+  }
+}
+```
+
+#### CDN 模式 (WebSocket)
+
+```json
+{
+  "type": "vless",
+  "tag": "xray-cdn",
+  "server": "<你的域名>",
+  "server_port": 443,
+  "uuid": "<UUID>",
+  "tls": {
+    "enabled": true,
+    "server_name": "<你的域名>"
+  },
+  "transport": {
+    "type": "ws",
+    "path": "/vless",
+    "headers": {
+      "Host": "<你的域名>"
     }
   }
 }
