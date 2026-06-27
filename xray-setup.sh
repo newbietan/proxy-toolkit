@@ -348,6 +348,9 @@ EOF
 install_openrc_service() {
     log_info "安装 OpenRC 服务..."
 
+    # 创建 PID 文件目录
+    mkdir -p /run
+
     cat > /etc/init.d/${SERVICE_NAME} <<'SCRIPT'
 #!/sbin/openrc-run
 
@@ -355,7 +358,7 @@ name="xray"
 command="/usr/local/bin/xray"
 command_args="run -config /usr/local/etc/xray/config.json"
 command_background=true
-pidfile="/var/run/${RC_SVCNAME}.pid"
+pidfile="/run/${RC_SVCNAME}.pid"
 start_stop_daemon_args="--background --make-pidfile"
 
 depend() {
@@ -364,7 +367,11 @@ depend() {
 }
 
 start_pre() {
-    checkpath --directory /var/run
+    # 确保 /run 目录存在
+    if [ ! -d /run ]; then
+        mkdir -p /run
+    fi
+    return 0
 }
 SCRIPT
 
