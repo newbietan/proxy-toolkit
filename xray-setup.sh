@@ -454,6 +454,7 @@ install_xray() {
     rm -rf "${tmp_dir}"
 
     log_info "Xray-core ${latest_ver} 安装完成"
+    mkdir -p "${XRAY_CONFIG_DIR}"
     echo "$latest_ver" > "${XRAY_CONFIG_DIR}/version.txt" 2>/dev/null || true
 }
 
@@ -559,7 +560,7 @@ PUBLIC_KEY=${public_key}
 SHORT_ID=${short_id}
 SERVER_IP=${server_ip}
 SNI=www.microsoft.com
-INSTALL_DATE=$(date '+%Y-%m-%d %H:%M:%S')
+INSTALL_DATE="$(date '+%Y-%m-%d %H:%M:%S')"
 EOF
 
     log_info "配置生成完成"
