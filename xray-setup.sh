@@ -104,9 +104,19 @@ check_port() {
     if command -v lsof &>/dev/null; then
         pid=$(lsof -ti:${port} 2>/dev/null | head -1)
     elif command -v ss &>/dev/null; then
-        pid=$(ss -tlnp "sport = :${port}" 2>/dev/null | grep -oP 'pid=\K[0-9]+' | head -1)
+        # 兼容 Alpine Linux (busybox ss)
+        local ss_output=$(ss -tlnp "sport = :${port}" 2>/dev/null)
+        if echo "$ss_output" | grep -qE "LISTEN.*:${port}"; then
+            pid=$(echo "$ss_output" | grep -oP 'pid=\K[0-9]+' | head -1)
+        fi
     elif command -v netstat &>/dev/null; then
         pid=$(netstat -tlnp 2>/dev/null | grep ":${port} " | awk '{print $7}' | cut -d'/' -f1 | head -1)
+    fi
+
+    # 跳过 PID 1 (init 进程) - Alpine Linux 误判
+    if [[ "$pid" == "1" ]]; then
+        log_info "端口 ${port} 可用"
+        return 0
     fi
 
     if [[ -n "$pid" ]]; then
