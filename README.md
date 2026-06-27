@@ -187,8 +187,10 @@ proxies:
 | Xray 二进制 | `/usr/local/bin/xray` |
 | 配置文件 | `/usr/local/etc/xray/config.json` |
 | 安装信息 | `/usr/local/etc/xray/install-info.conf` |
+| TLS 证书 | `/usr/local/etc/xray/certs/` |
 | 日志 | `/var/log/xray/` |
 | systemd 服务 | `/etc/systemd/system/xray.service` |
+| OpenRC 服务 | `/etc/init.d/xray` |
 
 ## 系统要求
 
@@ -198,13 +200,13 @@ proxies:
 
 ## 兼容性
 
-| 系统 | 包管理器 | Init 系统 | 状态 |
-|------|----------|-----------|------|
-| Ubuntu/Debian | apt | systemd | ✅ 完全支持 |
-| CentOS/RHEL | yum/dnf | systemd | ✅ 完全支持 |
-| Alpine | apk | OpenRC | ✅ 支持 |
-| Arch Linux | pacman | systemd | ✅ 支持 |
-| 无 systemd 的系统 | - | nohup | ✅ 兼容模式 |
+| 系统 | 包管理器 | Init 系统 | 状态 | 备注 |
+|------|----------|-----------|------|------|
+| Ubuntu/Debian | apt | systemd | ✅ 完全支持 | 推荐 |
+| CentOS/RHEL | yum/dnf | systemd | ✅ 完全支持 | |
+| Alpine | apk | OpenRC | ✅ 支持 | 需先安装 bash |
+| Arch Linux | pacman | systemd | ✅ 支持 | |
+| 无 systemd 的系统 | - | nohup | ✅ 兼容模式 | |
 
 ## 自动处理
 
@@ -216,8 +218,41 @@ proxies:
 - **开机启动**: 自动配置开机启动（支持所有 init 系统）
 - **BBR**: 自动开启 BBR 拥塞控制，提升网络性能
 - **ICMP**: 自动开启 ICMP，允许 ping 测试
+- **依赖工具**: 自动安装端口检测工具（iproute2/net-tools/lsof）
+- **版本获取**: 自动获取最新 Xray-core 版本（兼容 Alpine Linux）
 
 ## 常见问题
+
+### Alpine Linux 问题
+
+#### 1. bash: not found
+
+Alpine Linux 默认没有 bash，需先安装：
+
+```bash
+apk add bash
+```
+
+#### 2. OpenRC 服务启动失败 (Symbolic link loop)
+
+这是 Alpine Linux 的 `/var/run` 符号链接问题，脚本已自动处理。如仍有问题：
+
+```bash
+# 手动创建 PID 文件目录
+mkdir -p /run
+
+# 重启服务
+rc-service xray restart
+```
+
+#### 3. 端口检测失败
+
+脚本会自动安装端口检测工具。如仍有问题：
+
+```bash
+# 安装必要工具
+apk add iproute2 net-tools lsof
+```
 
 ### 下载失败（国内服务器）
 
@@ -250,6 +285,9 @@ iptables -A INPUT -p tcp --dport 443 -j ACCEPT
 ```bash
 # systemd 系统
 journalctl -u xray -f
+
+# OpenRC 系统 (Alpine)
+tail -f /var/log/xray/error.log
 
 # nohup 模式
 tail -f /var/log/xray/xray.log
