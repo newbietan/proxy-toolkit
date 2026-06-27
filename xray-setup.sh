@@ -170,22 +170,42 @@ generate_short_id() {
     openssl rand -hex 8
 }
 
-# 生成 TLS 证书（CDN 模式用）
-generate_tls_cert() {
+# 获取 Cloudflare Origin 证书路径
+get_cert_paths() {
     local domain="$1"
-    local cert_dir="${XRAY_CONFIG_DIR}/certs"
 
-    mkdir -p "${cert_dir}"
+    echo "" >&2
+    echo -e "${CYAN}--------------------------------------------${NC}" >&2
+    echo -e "${GREEN}  配置 TLS 证书${NC}" >&2
+    echo -e "${CYAN}--------------------------------------------${NC}" >&2
+    echo "" >&2
+    echo -e "${YELLOW}请先申请 Cloudflare Origin 证书：${NC}" >&2
+    echo "" >&2
+    echo -e "  1. 登录 Cloudflare Dashboard" >&2
+    echo -e "  2. 进入域名 → SSL/TLS → 源服务器" >&2
+    echo -e "  3. 点击「创建证书」" >&2
+    echo -e "  4. 保持默认设置，点击「创建」" >&2
+    echo -e "  5. 复制证书和私钥内容" >&2
+    echo "" >&2
 
-    # 生成自签名证书（有效期 10 年）
-    openssl req -x509 -nodes -days 3650 \
-        -newkey rsa:2048 \
-        -keyout "${cert_dir}/private.key" \
-        -out "${cert_dir}/cert.pem" \
-        -subj "/CN=${domain}" \
-        -addext "subjectAltName=DNS:${domain}" 2>/dev/null
+    # 获取证书路径
+    echo -n "请输入证书文件路径 (cert.pem): " >&2
+    read cert_file
 
-    echo "${cert_dir}"
+    if [[ ! -f "$cert_file" ]]; then
+        log_error "证书文件不存在: $cert_file" >&2
+        exit 1
+    fi
+
+    echo -n "请输入私钥文件路径 (private.key): " >&2
+    read key_file
+
+    if [[ ! -f "$key_file" ]]; then
+        log_error "私钥文件不存在: $key_file" >&2
+        exit 1
+    fi
+
+    echo "${cert_file}|${key_file}"
 }
 
 # 选择部署模式
@@ -646,10 +666,10 @@ generate_config() {
             ws_port=443
         fi
 
-        # 生成 TLS 证书
-        log_info "为域名 ${domain} 生成 TLS 证书..."
-        local cert_dir=$(generate_tls_cert "${domain}")
-        log_info "证书已生成到 ${cert_dir}"
+        # 获取用户提供的证书路径
+        local cert_paths=$(get_cert_paths "${domain}")
+        local cert_file=$(echo "$cert_paths" | cut -d'|' -f1)
+        local key_file=$(echo "$cert_paths" | cut -d'|' -f2)
 
         if [[ -n "$inbounds" ]]; then
             inbounds="${inbounds},"
@@ -674,8 +694,8 @@ generate_config() {
                 \"tlsSettings\": {
                     \"certificates\": [
                         {
-                            \"certificateFile\": \"${cert_dir}/cert.pem\",
-                            \"keyFile\": \"${cert_dir}/private.key\"
+                            \"certificateFile\": \"${cert_file}\",
+                            \"keyFile\": \"${key_file}\"
                         }
                     ]
                 },
@@ -738,6 +758,8 @@ SHORT_ID=${short_id}
 SERVER_IP=${server_ip}
 SNI=www.microsoft.com
 DOMAIN=${domain}
+CERT_FILE=${cert_file}
+KEY_FILE=${key_file}
 INSTALL_DATE="$(date '+%Y-%m-%d %H:%M:%S')"
 EOF
 
@@ -896,7 +918,8 @@ show_info() {
         echo -e "  ${BLUE}路径:${NC}   /vless"
         echo -e "  ${BLUE}TLS:${NC}    开启"
         echo -e "  ${BLUE}SNI:${NC}    ${cdn_address}"
-        echo -e "  ${BLUE}证书:${NC}   ${XRAY_CONFIG_DIR}/certs/"
+        echo -e "  ${BLUE}证书:${NC}   ${CERT_FILE}"
+        echo -e "  ${BLUE}私钥:${NC}   ${KEY_FILE}"
         echo ""
         echo -e "${YELLOW}Cloudflare 配置:${NC}"
         echo -e "  1. 添加 A 记录指向 ${SERVER_IP}"

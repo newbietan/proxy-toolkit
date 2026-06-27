@@ -52,15 +52,28 @@ xray-setup.sh icmp        # 开启 ICMP (允许 ping)
 
 ### CDN 模式额外配置
 
-安装完成后，需要在 Cloudflare 控制面板进行以下配置：
+#### 1. 申请 Cloudflare Origin 证书
+
+1. 登录 [Cloudflare Dashboard](https://dash.cloudflare.com/)
+2. 选择你的域名
+3. 进入 **SSL/TLS** → **源服务器**
+4. 点击 **创建证书**
+5. 保持默认设置（RSA 2048，有效期 15 年）
+6. 复制 **证书** 和 **私钥** 内容，保存为文件：
+   - 证书：`/path/to/cert.pem`
+   - 私钥：`/path/to/private.key`
+
+#### 2. 运行安装脚本
+
+选择 CDN 模式或双模式后，脚本会提示输入证书和私钥文件路径。
+
+#### 3. Cloudflare 配置
+
+安装完成后，在 Cloudflare 控制面板进行以下配置：
 
 1. **添加 A 记录**：指向服务器 IP，开启橙色云朵（代理）
 2. **SSL/TLS 设置**：选择 "Full"（不要选 "Full (Strict)"）
 3. **回源端口**（双模式）：设置为 8080
-
-证书位置：`/usr/local/etc/xray/certs/`
-
-> 提示：脚本使用自签名证书，配合 Cloudflare "Full" 模式即可。如需更高安全性，可从 Cloudflare 仪表板获取 Origin 证书替换。
 
 ## 客户端配置
 
