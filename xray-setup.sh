@@ -172,23 +172,23 @@ generate_short_id() {
 
 # 选择部署模式
 select_mode() {
-    echo ""
-    echo -e "${CYAN}============================================${NC}"
-    echo -e "${GREEN}  选择部署模式${NC}"
-    echo -e "${CYAN}============================================${NC}"
-    echo ""
-    echo -e "  ${BLUE}1)${NC} 直连模式 (VLESS + Reality)"
-    echo -e "     - 速度快、延迟低、伪装强"
-    echo -e "     - 需要服务器 IP 稳定"
-    echo ""
-    echo -e "  ${BLUE}2)${NC} CDN 模式 (VLESS + WebSocket + Cloudflare)"
-    echo -e "     - 隐藏源站 IP、抗封锁"
-    echo -e "     - 速度稍慢、需要域名"
-    echo ""
-    echo -e "  ${BLUE}3)${NC} 双模式 (同时部署直连 + CDN)"
-    echo -e "     - 两种方式都支持"
-    echo -e "     - 推荐：主用直连，CDN 备用"
-    echo ""
+    echo "" >&2
+    echo -e "${CYAN}============================================${NC}" >&2
+    echo -e "${GREEN}  选择部署模式${NC}" >&2
+    echo -e "${CYAN}============================================${NC}" >&2
+    echo "" >&2
+    echo -e "  ${BLUE}1)${NC} 直连模式 (VLESS + Reality)" >&2
+    echo -e "     - 速度快、延迟低、伪装强" >&2
+    echo -e "     - 需要服务器 IP 稳定" >&2
+    echo "" >&2
+    echo -e "  ${BLUE}2)${NC} CDN 模式 (VLESS + WebSocket + Cloudflare)" >&2
+    echo -e "     - 隐藏源站 IP、抗封锁" >&2
+    echo -e "     - 速度稍慢、需要域名" >&2
+    echo "" >&2
+    echo -e "  ${BLUE}3)${NC} 双模式 (同时部署直连 + CDN)" >&2
+    echo -e "     - 两种方式都支持" >&2
+    echo -e "     - 推荐：主用直连，CDN 备用" >&2
+    echo "" >&2
     read -p "请选择模式 [1/2/3]: " mode_choice
 
     case "$mode_choice" in
@@ -201,20 +201,20 @@ select_mode() {
 
 # 获取域名（CDN 模式用）
 get_domain() {
-    echo ""
-    echo -e "${CYAN}--------------------------------------------${NC}"
-    echo -e "${GREEN}  CDN 模式配置${NC}"
-    echo -e "${CYAN}--------------------------------------------${NC}"
-    echo ""
-    echo -e "${YELLOW}请确保已完成以下步骤：${NC}"
-    echo -e "  1. 拥有一个域名（如 example.com）"
-    echo -e "  2. 域名 NS 已切换到 Cloudflare"
-    echo -e "  3. 在 Cloudflare 添加了 A 记录指向本机 IP"
-    echo ""
+    echo "" >&2
+    echo -e "${CYAN}--------------------------------------------${NC}" >&2
+    echo -e "${GREEN}  CDN 模式配置${NC}" >&2
+    echo -e "${CYAN}--------------------------------------------${NC}" >&2
+    echo "" >&2
+    echo -e "${YELLOW}请确保已完成以下步骤：${NC}" >&2
+    echo -e "  1. 拥有一个域名（如 example.com）" >&2
+    echo -e "  2. 域名 NS 已切换到 Cloudflare" >&2
+    echo -e "  3. 在 Cloudflare 添加了 A 记录指向本机 IP" >&2
+    echo "" >&2
     read -p "请输入你的域名 (如 proxy.example.com): " domain
 
     if [[ -z "$domain" ]]; then
-        log_error "域名不能为空"
+        log_error "域名不能为空" >&2
         exit 1
     fi
 
