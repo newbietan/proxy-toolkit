@@ -5,7 +5,7 @@
 ## 快速安装
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/your-repo/xray-setup/main/xray-setup.sh) install
+bash <(curl -fsSL https://raw.githubusercontent.com/newbietan/proxy-toolkit/main/xray-setup.sh) install
 ```
 
 或下载后运行：
