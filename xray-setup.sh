@@ -695,7 +695,7 @@ generate_config() {
 
         inbounds="${inbounds}
         {
-            \"listen\": \"127.0.0.1\",
+            \"listen\": \"0.0.0.0\",
             \"port\": ${ws_port},
             \"protocol\": \"vless\",
             \"settings\": {
