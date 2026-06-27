@@ -12,6 +12,7 @@ XRAY_CONFIG="${XRAY_CONFIG_DIR}/config.json"
 XRAY_LOG="/var/log/xray"
 SERVICE_NAME="xray"
 GITHUB_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
+GITHUB_LATEST_URL="https://github.com/XTLS/Xray-core/releases/latest"
 INSTALL_INFO="${XRAY_CONFIG_DIR}/install-info.conf"
 PID_FILE="/var/run/xray.pid"
 
@@ -607,21 +608,25 @@ install_xray() {
     local arch=$(get_arch)
     log_info "架构: ${arch}"
 
-    # 获取最新版本
+    # 获取最新版本（使用重定向方式，更可靠）
     log_info "获取最新版本信息..."
     local latest_ver=""
-    local api_response=$(curl -s ${GITHUB_API} 2>/dev/null)
 
-    # 优先使用 jq 解析（更可靠）
-    if command -v jq &>/dev/null; then
-        latest_ver=$(echo "$api_response" | jq -r '.tag_name' 2>/dev/null)
+    # 方法1: 从 GitHub 重定向获取版本号
+    latest_ver=$(curl -sI -o /dev/null -w '%{redirect_url}' "${GITHUB_LATEST_URL}" 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+
+    # 方法2: 如果重定向失败，尝试 API
+    if [[ -z "$latest_ver" ]]; then
+        local api_response=$(curl -s ${GITHUB_API} 2>/dev/null)
+        if command -v jq &>/dev/null; then
+            latest_ver=$(echo "$api_response" | jq -r '.tag_name // empty' 2>/dev/null)
+        fi
+        if [[ -z "$latest_ver" ]]; then
+            latest_ver=$(echo "$api_response" | grep -o '"tag_name":"[^"]*"' | head -1 | cut -d'"' -f4)
+        fi
     fi
 
-    # 如果 jq 失败，使用 grep 解析
-    if [[ -z "$latest_ver" || "$latest_ver" == "null" ]]; then
-        latest_ver=$(echo "$api_response" | grep -o '"tag_name":"[^"]*"' | head -1 | cut -d'"' -f4)
-    fi
-
+    # 方法3: 使用默认版本
     if [[ -z "$latest_ver" ]]; then
         log_warn "获取版本失败，使用默认版本 v25.6.8"
         latest_ver="v25.6.8"
@@ -873,18 +878,21 @@ update_xray() {
 
     local current_ver=$(${XRAY_DIR}/xray version 2>/dev/null | head -1 | awk '{print $2}')
 
-    # 获取最新版本
+    # 获取最新版本（使用重定向方式，更可靠）
     local latest_ver=""
-    local api_response=$(curl -s ${GITHUB_API} 2>/dev/null)
 
-    # 优先使用 jq 解析（更可靠）
-    if command -v jq &>/dev/null; then
-        latest_ver=$(echo "$api_response" | jq -r '.tag_name' 2>/dev/null)
-    fi
+    # 方法1: 从 GitHub 重定向获取版本号
+    latest_ver=$(curl -sI -o /dev/null -w '%{redirect_url}' "${GITHUB_LATEST_URL}" 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
 
-    # 如果 jq 失败，使用 grep 解析
-    if [[ -z "$latest_ver" || "$latest_ver" == "null" ]]; then
-        latest_ver=$(echo "$api_response" | grep -o '"tag_name":"[^"]*"' | head -1 | cut -d'"' -f4)
+    # 方法2: 如果重定向失败，尝试 API
+    if [[ -z "$latest_ver" ]]; then
+        local api_response=$(curl -s ${GITHUB_API} 2>/dev/null)
+        if command -v jq &>/dev/null; then
+            latest_ver=$(echo "$api_response" | jq -r '.tag_name // empty' 2>/dev/null)
+        fi
+        if [[ -z "$latest_ver" ]]; then
+            latest_ver=$(echo "$api_response" | grep -o '"tag_name":"[^"]*"' | head -1 | cut -d'"' -f4)
+        fi
     fi
 
     log_info "当前版本: ${current_ver}"
