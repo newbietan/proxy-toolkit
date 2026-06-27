@@ -170,9 +170,12 @@ generate_short_id() {
     openssl rand -hex 8
 }
 
-# 获取 Cloudflare Origin 证书路径
-get_cert_paths() {
+# 获取 Cloudflare Origin 证书内容
+get_cert_content() {
     local domain="$1"
+    local cert_dir="${XRAY_CONFIG_DIR}/certs"
+
+    mkdir -p "${cert_dir}"
 
     echo "" >&2
     echo -e "${CYAN}--------------------------------------------${NC}" >&2
@@ -187,25 +190,40 @@ get_cert_paths() {
     echo -e "  4. 保持默认设置，点击「创建」" >&2
     echo -e "  5. 复制证书和私钥内容" >&2
     echo "" >&2
+    echo -e "${CYAN}--------------------------------------------${NC}" >&2
+    echo "" >&2
 
-    # 获取证书路径
-    echo -n "请输入证书文件路径 (cert.pem): " >&2
-    read cert_file
+    # 获取证书内容
+    echo -e "${GREEN}请粘贴证书内容（以 -----BEGIN CERTIFICATE----- 开头）：${NC}" >&2
+    echo -e "${YELLOW}输入完成后按 Ctrl+D 结束${NC}" >&2
+    echo "" >&2
+    cert_content=$(cat)
 
-    if [[ ! -f "$cert_file" ]]; then
-        log_error "证书文件不存在: $cert_file" >&2
+    if [[ -z "$cert_content" ]]; then
+        log_error "证书内容不能为空" >&2
         exit 1
     fi
 
-    echo -n "请输入私钥文件路径 (private.key): " >&2
-    read key_file
+    # 保存证书
+    echo "$cert_content" > "${cert_dir}/cert.pem"
+    log_info "证书已保存到 ${cert_dir}/cert.pem" >&2
 
-    if [[ ! -f "$key_file" ]]; then
-        log_error "私钥文件不存在: $key_file" >&2
+    echo "" >&2
+    echo -e "${GREEN}请粘贴私钥内容（以 -----BEGIN PRIVATE KEY----- 开头）：${NC}" >&2
+    echo -e "${YELLOW}输入完成后按 Ctrl+D 结束${NC}" >&2
+    echo "" >&2
+    key_content=$(cat)
+
+    if [[ -z "$key_content" ]]; then
+        log_error "私钥内容不能为空" >&2
         exit 1
     fi
 
-    echo "${cert_file}|${key_file}"
+    # 保存私钥
+    echo "$key_content" > "${cert_dir}/private.key"
+    log_info "私钥已保存到 ${cert_dir}/private.key" >&2
+
+    echo "${cert_dir}/cert.pem|${cert_dir}/private.key"
 }
 
 # 选择部署模式
@@ -666,8 +684,8 @@ generate_config() {
             ws_port=443
         fi
 
-        # 获取用户提供的证书路径
-        local cert_paths=$(get_cert_paths "${domain}")
+        # 获取用户提供的证书内容
+        local cert_paths=$(get_cert_content "${domain}")
         local cert_file=$(echo "$cert_paths" | cut -d'|' -f1)
         local key_file=$(echo "$cert_paths" | cut -d'|' -f2)
 
