@@ -241,17 +241,12 @@ select_mode() {
     echo -e "     - 隐藏源站 IP、抗封锁" >&2
     echo -e "     - 速度稍慢、需要域名" >&2
     echo "" >&2
-    echo -e "  ${BLUE}3)${NC} 双模式 (同时部署直连 + CDN)" >&2
-    echo -e "     - 两种方式都支持" >&2
-    echo -e "     - 推荐：主用直连，CDN 备用" >&2
-    echo "" >&2
-    echo -n "请选择模式 [1/2/3]: " >&2
+    echo -n "请选择模式 [1/2]: " >&2
     read mode_choice
 
     case "$mode_choice" in
         1) echo "direct" ;;
         2) echo "cdn" ;;
-        3) echo "both" ;;
         *) echo "direct" ;;
     esac
 }
@@ -635,7 +630,7 @@ generate_config() {
     local inbounds=""
 
     # 直连模式 (Reality)
-    if [[ "$mode" == "direct" || "$mode" == "both" ]]; then
+    if [[ "$mode" == "direct" ]]; then
         inbounds="${inbounds}
         {
             \"listen\": \"0.0.0.0\",
@@ -678,11 +673,8 @@ generate_config() {
     fi
 
     # CDN 模式 (WebSocket + TLS)
-    if [[ "$mode" == "cdn" || "$mode" == "both" ]]; then
-        local ws_port=8080
-        if [[ "$mode" == "cdn" ]]; then
-            ws_port=443
-        fi
+    if [[ "$mode" == "cdn" ]]; then
+        local ws_port=443
 
         # 获取用户提供的证书内容
         local cert_paths=$(get_cert_content "${domain}")
@@ -888,7 +880,7 @@ show_info() {
     echo -e "${CYAN}============================================${NC}"
 
     # 直连模式信息
-    if [[ "$mode" == "direct" || "$mode" == "both" ]]; then
+    if [[ "$mode" == "direct" ]]; then
         local reality_link="vless://${UUID}@${SERVER_IP}:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#Xray-Reality"
 
         echo ""
@@ -918,12 +910,8 @@ show_info() {
     fi
 
     # CDN 模式信息
-    if [[ "$mode" == "cdn" || "$mode" == "both" ]]; then
+    if [[ "$mode" == "cdn" ]]; then
         local cdn_address="${DOMAIN:-<YOUR_DOMAIN>}"
-        local ws_port=443
-        if [[ "$mode" == "both" ]]; then
-            ws_port=8080
-        fi
         local ws_link="vless://${UUID}@${cdn_address}:443?encryption=none&security=tls&sni=${cdn_address}&fp=chrome&type=ws&host=${cdn_address}&path=%2Fvless#Xray-CDN"
 
         echo ""
@@ -943,9 +931,6 @@ show_info() {
         echo -e "  1. 添加 A 记录指向 ${SERVER_IP}"
         echo -e "  2. 开启橙色云朵（代理）"
         echo -e "  3. SSL/TLS 设置为 Full（不选 Strict）"
-        if [[ "$mode" == "both" ]]; then
-            echo -e "  4. 回源端口: ${ws_port}"
-        fi
         echo ""
         echo -e "${CYAN}--------------------------------------------${NC}"
         echo -e "${GREEN}CDN 分享链接:${NC}"
@@ -988,10 +973,9 @@ show_usage() {
     echo ""
     echo "命令:"
     echo "  install     安装 Xray-core 并生成配置"
-    echo "              支持三种模式："
+    echo "              支持两种模式："
     echo "                1. 直连模式 (VLESS + Reality)"
     echo "                2. CDN 模式 (VLESS + WebSocket + Cloudflare)"
-    echo "                3. 双模式 (同时部署直连 + CDN)"
     echo "  uninstall   卸载 Xray-core"
     echo "  status      查看服务状态"
     echo "  show        显示节点信息和分享链接"
@@ -1020,7 +1004,7 @@ main() {
             local domain=""
 
             # CDN 模式需要域名
-            if [[ "$mode" == "cdn" || "$mode" == "both" ]]; then
+            if [[ "$mode" == "cdn" ]]; then
                 domain=$(get_domain)
             fi
 
@@ -1030,9 +1014,6 @@ main() {
 
             # 检查端口
             check_port 443
-            if [[ "$mode" == "both" ]]; then
-                check_port 8080
-            fi
 
             install_xray
             generate_config "$mode" "$domain"

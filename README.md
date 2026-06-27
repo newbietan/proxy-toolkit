@@ -8,7 +8,6 @@
 |------|------|------|----------|
 | **直连模式** | VLESS + Reality | 速度快、延迟低、伪装强 | IP 稳定、追求性能 |
 | **CDN 模式** | VLESS + WebSocket + Cloudflare | 隐藏 IP、抗封锁 | IP 易被封、需要稳定 |
-| **双模式** | 同时部署直连 + CDN | 两种方式都支持 | 推荐：主用直连，CDN 备用 |
 
 ## 快速安装
 
@@ -27,6 +26,12 @@ chmod +x xray-setup.sh
 1. 拥有一个域名
 2. 域名 NS 已切换到 Cloudflare
 3. 在 Cloudflare 添加 A 记录指向服务器 IP
+
+## 卸载
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/newbietan/proxy-toolkit/main/xray-setup.sh) uninstall
+```
 
 ## 命令
 
@@ -63,7 +68,7 @@ xray-setup.sh icmp        # 开启 ICMP (允许 ping)
 
 #### 2. 运行安装脚本
 
-选择 CDN 模式或双模式后，脚本会提示粘贴证书和私钥内容。输入完成后按 `Ctrl+D` 结束。
+选择 CDN 模式后，脚本会提示粘贴证书和私钥内容。输入完成后按 `Ctrl+D` 结束。
 
 #### 3. Cloudflare 配置
 
@@ -71,7 +76,6 @@ xray-setup.sh icmp        # 开启 ICMP (允许 ping)
 
 1. **添加 A 记录**：指向服务器 IP，开启橙色云朵（代理）
 2. **SSL/TLS 设置**：选择 "Full"（不要选 "Full (Strict)"）
-3. **回源端口**（双模式）：设置为 8080
 
 ## 客户端配置
 
