@@ -97,7 +97,7 @@ check_port() {
     local port="${1:-443}"
     log_info "检查端口 ${port} 占用情况..."
 
-    # 方法1: 尝试直接绑定端口测试是否可用
+    # 方法1: 尝试直接连接端口测试是否可用
     if command -v nc &>/dev/null; then
         if nc -z -w1 127.0.0.1 ${port} 2>/dev/null; then
             log_warn "端口 ${port} 已被占用"
@@ -122,6 +122,14 @@ check_port() {
         fi
     elif command -v netstat &>/dev/null; then
         pid=$(netstat -tlnp 2>/dev/null | grep ":${port} " | awk '{print $7}' | cut -d'/' -f1 | grep -v "^1$" | head -1)
+    fi
+
+    # 方法3: 如果都没有找到进程，但端口被占用，尝试查找
+    if [[ -z "$pid" ]]; then
+        # 使用 fuser 查找（如果可用）
+        if command -v fuser &>/dev/null; then
+            pid=$(fuser ${port}/tcp 2>/dev/null | tr -d ' ' | grep -v "^1$" | head -1)
+        fi
     fi
 
     if [[ -n "$pid" ]]; then
