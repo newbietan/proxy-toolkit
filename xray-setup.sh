@@ -418,6 +418,44 @@ EOF
     return 0
 }
 
+# 配置防火墙
+configure_firewall() {
+    log_info "配置防火墙..."
+
+    # 检测防火墙类型
+    if command -v ufw &>/dev/null; then
+        # Ubuntu/Debian ufw
+        log_info "检测到 ufw 防火墙"
+        ufw allow 22/tcp >/dev/null 2>&1 || true
+        ufw allow 443/tcp >/dev/null 2>&1 || true
+        ufw reload >/dev/null 2>&1 || true
+        log_info "ufw 已放行 22 和 443 端口"
+    elif command -v firewall-cmd &>/dev/null; then
+        # CentOS/RHEL firewalld
+        log_info "检测到 firewalld 防火墙"
+        firewall-cmd --permanent --add-port=22/tcp >/dev/null 2>&1 || true
+        firewall-cmd --permanent --add-port=443/tcp >/dev/null 2>&1 || true
+        firewall-cmd --reload >/dev/null 2>&1 || true
+        log_info "firewalld 已放行 22 和 443 端口"
+    elif command -v iptables &>/dev/null; then
+        # 通用 iptables
+        log_info "检测到 iptables 防火墙"
+        iptables -C INPUT -p tcp --dport 22 -j ACCEPT 2>/dev/null || \
+            iptables -I INPUT -p tcp --dport 22 -j ACCEPT
+        iptables -C INPUT -p tcp --dport 443 -j ACCEPT 2>/dev/null || \
+            iptables -I INPUT -p tcp --dport 443 -j ACCEPT
+        # 尝试持久化
+        if command -v iptables-save &>/dev/null; then
+            iptables-save > /etc/iptables.rules 2>/dev/null || true
+        fi
+        log_info "iptables 已放行 22 和 443 端口"
+    else
+        log_warn "未检测到防火墙，跳过配置"
+    fi
+
+    return 0
+}
+
 # ==================== 核心功能 ====================
 
 # 安装 Xray-core
@@ -747,6 +785,7 @@ main() {
             install_xray
             generate_config
             install_service
+            configure_firewall
             show_info
             ;;
         bbr)
