@@ -609,7 +609,19 @@ install_xray() {
 
     # 获取最新版本
     log_info "获取最新版本信息..."
-    local latest_ver=$(curl -s ${GITHUB_API} | grep '"tag_name"' | head -1 | awk -F '"' '{print $4}')
+    local latest_ver=""
+    local api_response=$(curl -s ${GITHUB_API} 2>/dev/null)
+
+    # 优先使用 jq 解析（更可靠）
+    if command -v jq &>/dev/null; then
+        latest_ver=$(echo "$api_response" | jq -r '.tag_name' 2>/dev/null)
+    fi
+
+    # 如果 jq 失败，使用 grep 解析
+    if [[ -z "$latest_ver" || "$latest_ver" == "null" ]]; then
+        latest_ver=$(echo "$api_response" | grep -o '"tag_name":"[^"]*"' | head -1 | cut -d'"' -f4)
+    fi
+
     if [[ -z "$latest_ver" ]]; then
         log_warn "获取版本失败，使用默认版本 v25.6.8"
         latest_ver="v25.6.8"
@@ -860,7 +872,20 @@ update_xray() {
     fi
 
     local current_ver=$(${XRAY_DIR}/xray version 2>/dev/null | head -1 | awk '{print $2}')
-    local latest_ver=$(curl -s ${GITHUB_API} | grep '"tag_name"' | head -1 | awk -F '"' '{print $4}')
+
+    # 获取最新版本
+    local latest_ver=""
+    local api_response=$(curl -s ${GITHUB_API} 2>/dev/null)
+
+    # 优先使用 jq 解析（更可靠）
+    if command -v jq &>/dev/null; then
+        latest_ver=$(echo "$api_response" | jq -r '.tag_name' 2>/dev/null)
+    fi
+
+    # 如果 jq 失败，使用 grep 解析
+    if [[ -z "$latest_ver" || "$latest_ver" == "null" ]]; then
+        latest_ver=$(echo "$api_response" | grep -o '"tag_name":"[^"]*"' | head -1 | cut -d'"' -f4)
+    fi
 
     log_info "当前版本: ${current_ver}"
     log_info "最新版本: ${latest_ver}"
