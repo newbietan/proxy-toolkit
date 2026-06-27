@@ -189,7 +189,8 @@ select_mode() {
     echo -e "     - 两种方式都支持" >&2
     echo -e "     - 推荐：主用直连，CDN 备用" >&2
     echo "" >&2
-    read -p "请选择模式 [1/2/3]: " mode_choice
+    echo -n "请选择模式 [1/2/3]: " >&2
+    read mode_choice
 
     case "$mode_choice" in
         1) echo "direct" ;;
@@ -211,7 +212,8 @@ get_domain() {
     echo -e "  2. 域名 NS 已切换到 Cloudflare" >&2
     echo -e "  3. 在 Cloudflare 添加了 A 记录指向本机 IP" >&2
     echo "" >&2
-    read -p "请输入你的域名 (如 proxy.example.com): " domain
+    echo -n "请输入你的域名 (如 proxy.example.com): " >&2
+    read domain
 
     if [[ -z "$domain" ]]; then
         log_error "域名不能为空" >&2
