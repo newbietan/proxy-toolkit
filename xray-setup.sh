@@ -90,6 +90,22 @@ install_deps() {
         pacman) pacman -Sy --noconfirm unzip curl jq ;;
         *)      log_warn "未知包管理器，请确保已安装 unzip curl jq" ;;
     esac
+
+    # 安装端口检测工具
+    log_info "安装端口检测工具..."
+    install_port_tools
+}
+
+# 安装端口检测工具
+install_port_tools() {
+    local pm=$(get_pm)
+    case $pm in
+        apt)    apt-get install -y -qq iproute2 net-tools lsof >/dev/null 2>&1 || true ;;
+        yum)    yum install -y -q iproute net-tools lsof >/dev/null 2>&1 || true ;;
+        dnf)    dnf install -y -q iproute net-tools lsof >/dev/null 2>&1 || true ;;
+        apk)    apk add --no-cache iproute2 net-tools lsof >/dev/null 2>&1 || true ;;
+        pacman) pacman -Sy --noconfirm iproute2 net-tools lsof >/dev/null 2>&1 || true ;;
+    esac
 }
 
 # 检测端口占用并处理
