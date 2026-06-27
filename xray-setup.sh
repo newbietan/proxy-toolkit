@@ -3,13 +3,6 @@
 # xray-setup: 极简 VLESS 一键部署脚本
 # 用法: bash xray-setup.sh [install|status|show|restart|uninstall|update]
 
-# 检查是否在 Alpine 上运行且没有 bash
-if [ ! -x /bin/bash ] && [ -x /bin/ash ]; then
-    echo "Alpine Linux 检测到，正在安装 bash..."
-    apk add --no-cache bash
-    exec bash "$0" "$@"
-fi
-
 set -e
 
 # ==================== 常量 ====================

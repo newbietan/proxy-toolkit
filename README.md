@@ -22,6 +22,13 @@ chmod +x xray-setup.sh
 ./xray-setup.sh install
 ```
 
+**Alpine Linux 用户需先安装 bash：**
+
+```bash
+apk add bash
+bash <(curl -fsSL https://raw.githubusercontent.com/newbietan/proxy-toolkit/main/xray-setup.sh) install
+```
+
 安装时会提示选择部署模式，CDN 模式需要提前准备：
 1. 拥有一个域名
 2. 域名 NS 已切换到 Cloudflare
