@@ -84,18 +84,29 @@ install_deps() {
     command -v unzip &>/dev/null || missing="unzip"
     command -v curl &>/dev/null || missing="$missing curl"
     command -v jq &>/dev/null || missing="$missing jq"
+    command -v openssl &>/dev/null || missing="$missing openssl"
+    command -v qrencode &>/dev/null || missing="$missing qrencode"
 
     if [[ -z "$missing" ]]; then
-        log_info "依赖已就绪 (unzip curl jq)"
+        log_info "依赖已就绪"
     else
         log_info "安装缺失依赖:${missing}..."
         case $pm in
-            apt)    apt-get update -qq && apt-get install -y -qq unzip curl jq ;;
-            yum)    yum install -y -q unzip curl jq ;;
-            dnf)    dnf install -y -q unzip curl jq ;;
-            apk)    apk add --no-cache unzip curl jq ;;
-            pacman) pacman -Sy --noconfirm unzip curl jq ;;
-            *)      log_warn "未知包管理器，请确保已安装 unzip curl jq" ;;
+            apt)    apt-get update -qq && apt-get install -y -qq unzip curl jq openssl qrencode ;;
+            yum)    yum install -y -q unzip curl jq openssl qrencode ;;
+            dnf)    dnf install -y -q unzip curl jq openssl qrencode ;;
+            apk)
+            # 启用 community 仓库（qrencode 在 community 中）
+            if ! grep -q "community" /etc/apk/repositories 2>/dev/null; then
+                local ver=$(cat /etc/alpine-release 2>/dev/null | cut -d. -f1,2)
+                if [[ -n "$ver" ]]; then
+                    echo "https://dl-cdn.alpinelinux.org/alpine/v${ver}/community" >> /etc/apk/repositories
+                fi
+            fi
+            apk add --no-cache unzip curl jq openssl qrencode
+            ;;
+            pacman) pacman -Sy --noconfirm unzip curl jq openssl qrencode ;;
+            *)      log_warn "未知包管理器，请确保已安装 unzip curl jq openssl qrencode" ;;
         esac
     fi
 
@@ -135,6 +146,11 @@ install_firewall() {
         pacman) pacman -Sy --noconfirm ufw >/dev/null 2>&1 ;;
         *)      log_warn "未知包管理器，请手动安装防火墙" ;;
     esac
+
+    # 验证安装结果
+    if ! command -v ufw &>/dev/null && ! command -v firewall-cmd &>/dev/null && ! command -v iptables &>/dev/null; then
+        log_warn "防火墙安装失败，请手动安装"
+    fi
 }
 
 # 检测端口占用并处理
