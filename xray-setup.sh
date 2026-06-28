@@ -3,8 +3,6 @@
 # xray-setup: 极简 VLESS 一键部署脚本
 # 用法: bash xray-setup.sh [install|status|show|restart|uninstall|update]
 
-set -e
-
 # ==================== 常量 ====================
 XRAY_DIR="/usr/local/bin"
 XRAY_CONFIG_DIR="/usr/local/etc/xray"
@@ -82,18 +80,26 @@ get_init_system() {
 # 安装依赖
 install_deps() {
     local pm=$(get_pm)
-    log_info "安装依赖 (unzip curl jq)..."
-    case $pm in
-        apt)    apt-get update -qq && apt-get install -y -qq unzip curl jq ;;
-        yum)    yum install -y -q unzip curl jq ;;
-        dnf)    dnf install -y -q unzip curl jq ;;
-        apk)    apk add --no-cache unzip curl jq ;;
-        pacman) pacman -Sy --noconfirm unzip curl jq ;;
-        *)      log_warn "未知包管理器，请确保已安装 unzip curl jq" ;;
-    esac
+    local missing=""
+    command -v unzip &>/dev/null || missing="unzip"
+    command -v curl &>/dev/null || missing="$missing curl"
+    command -v jq &>/dev/null || missing="$missing jq"
+
+    if [[ -z "$missing" ]]; then
+        log_info "依赖已就绪 (unzip curl jq)"
+    else
+        log_info "安装缺失依赖:${missing}..."
+        case $pm in
+            apt)    apt-get update -qq && apt-get install -y -qq unzip curl jq ;;
+            yum)    yum install -y -q unzip curl jq ;;
+            dnf)    dnf install -y -q unzip curl jq ;;
+            apk)    apk add --no-cache unzip curl jq ;;
+            pacman) pacman -Sy --noconfirm unzip curl jq ;;
+            *)      log_warn "未知包管理器，请确保已安装 unzip curl jq" ;;
+        esac
+    fi
 
     # 安装端口检测工具
-    log_info "安装端口检测工具..."
     install_port_tools
 }
 
@@ -114,38 +120,32 @@ check_port() {
     local port="${1:-443}"
     log_info "检查端口 ${port} 占用情况..."
 
-    # 方法1: 尝试直接连接端口测试是否可用
-    if command -v nc &>/dev/null; then
-        if nc -z -w1 127.0.0.1 ${port} 2>/dev/null; then
-            log_warn "端口 ${port} 已被占用"
-        else
-            log_info "端口 ${port} 可用"
-            return 0
-        fi
-    fi
-
-    # 方法2: 查找占用端口的进程（排除 PID 1）
     local pid=""
     local process_name=""
 
+    # 优先使用 lsof/ss/netstat 查找占用进程
     if command -v lsof &>/dev/null; then
         pid=$(lsof -ti:${port} 2>/dev/null | grep -v "^1$" | head -1)
     elif command -v ss &>/dev/null; then
-        # 兼容 Alpine Linux (busybox ss) - 使用更宽松的匹配
         local ss_output=$(ss -tlnp 2>/dev/null | grep ":${port} " || true)
         if [[ -n "$ss_output" ]]; then
-            # 尝试提取 PID，跳过 PID 1
             pid=$(echo "$ss_output" | grep -oP 'pid=\K[0-9]+' | grep -v "^1$" | head -1)
         fi
     elif command -v netstat &>/dev/null; then
         pid=$(netstat -tlnp 2>/dev/null | grep ":${port} " | awk '{print $7}' | cut -d'/' -f1 | grep -v "^1$" | head -1)
     fi
 
-    # 方法3: 如果都没有找到进程，但端口被占用，尝试查找
-    if [[ -z "$pid" ]]; then
-        # 使用 fuser 查找（如果可用）
-        if command -v fuser &>/dev/null; then
-            pid=$(fuser ${port}/tcp 2>/dev/null | tr -d ' ' | grep -v "^1$" | head -1)
+    # 兜底: fuser
+    if [[ -z "$pid" ]] && command -v fuser &>/dev/null; then
+        pid=$(fuser ${port}/tcp 2>/dev/null | tr -d ' ' | grep -v "^1$" | head -1)
+    fi
+
+    # 兜底: nc 连接测试（无法获取 PID，仅判断是否占用）
+    if [[ -z "$pid" ]] && command -v nc &>/dev/null; then
+        if nc -z -w1 127.0.0.1 ${port} 2>/dev/null; then
+            log_warn "端口 ${port} 已被占用，但无法获取占用进程信息"
+            log_error "请手动检查端口占用: lsof -i:${port} 或 ss -tlnp | grep :${port}"
+            exit 1
         fi
     fi
 
@@ -153,7 +153,6 @@ check_port() {
         process_name=$(ps -p ${pid} -o comm= 2>/dev/null || echo "unknown")
         log_warn "端口 ${port} 被进程 ${process_name} (PID: ${pid}) 占用"
 
-        # 常见服务处理
         case "$process_name" in
             nginx|apache2|httpd|caddy|lighttpd)
                 log_info "停止 ${process_name} 服务..."
@@ -277,7 +276,7 @@ select_mode() {
     echo -e "     - 速度快、延迟低、伪装强" >&2
     echo -e "     - 需要服务器 IP 稳定" >&2
     echo "" >&2
-    echo -e "  ${BLUE}2)${NC} CDN 模式 (VLESS + WebSocket + Cloudflare)" >&2
+    echo -e "  ${BLUE}2)${NC} CDN 模式 (VLESS + XHTTP + Cloudflare)" >&2
     echo -e "     - 隐藏源站 IP、抗封锁" >&2
     echo -e "     - 速度稍慢、需要域名" >&2
     echo "" >&2
@@ -384,6 +383,21 @@ SCRIPT
 
 # 使用 nohup 启动（兼容方案）
 install_nohup_service() {
+    # 检查是否已有进程在运行
+    if [[ -f ${PID_FILE} ]] && kill -0 $(cat ${PID_FILE}) 2>/dev/null; then
+        log_warn "Xray 已在运行 (PID: $(cat ${PID_FILE}))，先停止旧进程..."
+        kill $(cat ${PID_FILE}) 2>/dev/null || true
+        sleep 1
+        rm -f ${PID_FILE}
+    fi
+    # 兜底: 检查是否有残留 xray 进程占用端口
+    local old_pid=$(pgrep -x xray 2>/dev/null | head -1)
+    if [[ -n "$old_pid" ]]; then
+        log_warn "发现残留 Xray 进程 (PID: ${old_pid})，正在停止..."
+        kill ${old_pid} 2>/dev/null || true
+        sleep 1
+    fi
+
     log_info "使用 nohup 启动服务..."
 
     nohup ${XRAY_DIR}/xray run -config ${XRAY_CONFIG} > ${XRAY_LOG}/xray.log 2>&1 &
@@ -454,6 +468,11 @@ stop_service() {
                 kill $(cat ${PID_FILE}) 2>/dev/null || true
                 rm -f ${PID_FILE}
             fi
+            # 兜底: 清理可能残留的 xray 进程
+            local residual_pid=$(pgrep -x xray 2>/dev/null | head -1)
+            if [[ -n "$residual_pid" ]]; then
+                kill ${residual_pid} 2>/dev/null || true
+            fi
             ;;
     esac
 }
@@ -520,11 +539,8 @@ enable_bbr() {
         return 0
     fi
 
-    # 检查 BBR 模块是否可用
-    if ! modprobe tcp_bbr 2>/dev/null; then
-        log_warn "BBR 模块不可用"
-        return 1
-    fi
+    # 尝试加载 BBR 模块（容器中可能无法加载但模块已可用）
+    modprobe tcp_bbr 2>/dev/null || true
 
     # 配置 BBR
     cat > /etc/sysctl.d/99-bbr.conf <<EOF
@@ -595,9 +611,17 @@ configure_firewall() {
             iptables -I INPUT -p tcp --dport 22 -j ACCEPT
         iptables -C INPUT -p tcp --dport 443 -j ACCEPT 2>/dev/null || \
             iptables -I INPUT -p tcp --dport 443 -j ACCEPT
-        # 尝试持久化
+        # 持久化
         if command -v iptables-save &>/dev/null; then
             iptables-save > /etc/iptables.rules 2>/dev/null || true
+        fi
+        # 创建开机恢复脚本
+        if [[ -d /etc/network/if-pre-up.d ]]; then
+            cat > /etc/network/if-pre-up.d/iptables-restore <<'RESTORE'
+#!/bin/sh
+iptables-restore < /etc/iptables.rules 2>/dev/null
+RESTORE
+            chmod +x /etc/network/if-pre-up.d/iptables-restore 2>/dev/null || true
         fi
         log_info "iptables 已放行 22 和 443 端口"
     else
@@ -609,14 +633,8 @@ configure_firewall() {
 
 # ==================== 核心功能 ====================
 
-# 安装 Xray-core
-install_xray() {
-    log_info "检测系统架构..."
-    local arch=$(get_arch)
-    log_info "架构: ${arch}"
-
-    # 获取最新版本（使用重定向方式，更可靠）
-    log_info "获取最新版本信息..."
+# 获取 Xray-core 最新版本号
+get_latest_version() {
     local latest_ver=""
 
     # 方法1: 从 GitHub 重定向获取版本号
@@ -638,6 +656,18 @@ install_xray() {
         log_warn "获取版本失败，使用默认版本 v25.6.8"
         latest_ver="v25.6.8"
     fi
+
+    echo "$latest_ver"
+}
+
+# 安装 Xray-core
+install_xray() {
+    log_info "检测系统架构..."
+    local arch=$(get_arch)
+    log_info "架构: ${arch}"
+
+    log_info "获取最新版本信息..."
+    local latest_ver=$(get_latest_version)
     log_info "最新版本: ${latest_ver}"
 
     # 下载
@@ -673,6 +703,12 @@ generate_config() {
     mkdir -p "${XRAY_CONFIG_DIR}"
     mkdir -p "${XRAY_LOG}"
 
+    # 备份已有配置
+    if [[ -f "${XRAY_CONFIG}" ]]; then
+        cp "${XRAY_CONFIG}" "${XRAY_CONFIG}.bak"
+        log_info "已备份旧配置到 ${XRAY_CONFIG}.bak"
+    fi
+
     # 生成密钥
     local uuid=$(generate_uuid)
     local keys=$(generate_keys)
@@ -690,136 +726,124 @@ generate_config() {
     fi
 
     # 根据模式生成配置
-    local inbounds=""
+    local inbound_json=""
 
     # 直连模式 (Reality)
     if [[ "$mode" == "direct" ]]; then
-        inbounds="${inbounds}
-        {
-            \"listen\": \"0.0.0.0\",
-            \"port\": 443,
-            \"protocol\": \"vless\",
-            \"settings\": {
-                \"clients\": [
-                    {
-                        \"id\": \"${uuid}\",
-                        \"flow\": \"xtls-rprx-vision\"
+        inbound_json=$(jq -n \
+            --arg uuid "$uuid" \
+            --arg private_key "$private_key" \
+            --arg short_id "$short_id" \
+            '{
+                listen: "0.0.0.0",
+                port: 443,
+                protocol: "vless",
+                settings: {
+                    clients: [{ id: $uuid, flow: "xtls-rprx-vision" }],
+                    decryption: "none"
+                },
+                streamSettings: {
+                    network: "tcp",
+                    security: "reality",
+                    realitySettings: {
+                        show: false,
+                        dest: "www.microsoft.com:443",
+                        xver: 0,
+                        serverNames: ["www.microsoft.com"],
+                        privateKey: $private_key,
+                        shortIds: [$short_id]
                     }
-                ],
-                \"decryption\": \"none\"
-            },
-            \"streamSettings\": {
-                \"network\": \"tcp\",
-                \"security\": \"reality\",
-                \"realitySettings\": {
-                    \"show\": false,
-                    \"dest\": \"www.microsoft.com:443\",
-                    \"xver\": 0,
-                    \"serverNames\": [
-                        \"www.microsoft.com\"
-                    ],
-                    \"privateKey\": \"${private_key}\",
-                    \"shortIds\": [
-                        \"${short_id}\"
-                    ]
+                },
+                sniffing: {
+                    enabled: true,
+                    destOverride: ["http", "tls", "quic"]
                 }
-            },
-            \"sniffing\": {
-                \"enabled\": true,
-                \"destOverride\": [
-                    \"http\",
-                    \"tls\",
-                    \"quic\"
-                ]
-            }
-        }"
+            }')
     fi
 
-    # CDN 模式 (WebSocket + TLS)
+    # CDN 模式 (XHTTP + TLS)
     if [[ "$mode" == "cdn" ]]; then
-        local ws_port=443
+        local cdn_port=443
 
-        # 获取用户提供的证书内容
         local cert_paths=$(get_cert_content "${domain}")
         local cert_file=$(echo "$cert_paths" | cut -d'|' -f1)
         local key_file=$(echo "$cert_paths" | cut -d'|' -f2)
 
-        if [[ -n "$inbounds" ]]; then
-            inbounds="${inbounds},"
-        fi
-
-        inbounds="${inbounds}
-        {
-            \"listen\": \"0.0.0.0\",
-            \"port\": ${ws_port},
-            \"protocol\": \"vless\",
-            \"settings\": {
-                \"clients\": [
-                    {
-                        \"id\": \"${uuid}\"
-                    }
-                ],
-                \"decryption\": \"none\"
-            },
-            \"streamSettings\": {
-                \"network\": \"ws\",
-                \"security\": \"tls\",
-                \"tlsSettings\": {
-                    \"certificates\": [
-                        {
-                            \"certificateFile\": \"${cert_file}\",
-                            \"keyFile\": \"${key_file}\"
-                        }
-                    ]
+        inbound_json=$(jq -n \
+            --arg uuid "$uuid" \
+            --arg cert_file "$cert_file" \
+            --arg key_file "$key_file" \
+            --argjson port "$cdn_port" \
+            '{
+                listen: "0.0.0.0",
+                port: $port,
+                protocol: "vless",
+                settings: {
+                    clients: [{ id: $uuid }],
+                    decryption: "none"
                 },
-                \"wsSettings\": {
-                    \"path\": \"/vless\"
+                streamSettings: {
+                    network: "xhttp",
+                    security: "tls",
+                    tlsSettings: {
+                        certificates: [{
+                            certificateFile: $cert_file,
+                            keyFile: $key_file
+                        }]
+                    },
+                    xhttpSettings: {
+                        path: "/vless-xhttp"
+                    }
+                },
+                sniffing: {
+                    enabled: true,
+                    destOverride: ["http", "tls", "quic"]
                 }
-            },
-            \"sniffing\": {
-                \"enabled\": true,
-                \"destOverride\": [
-                    \"http\",
-                    \"tls\",
-                    \"quic\"
-                ]
-            }
-        }"
+            }')
     fi
 
     # 生成配置文件
-    cat > "${XRAY_CONFIG}" <<EOF
-{
-    "log": {
-        "loglevel": "warning",
-        "access": "${XRAY_LOG}/access.log",
-        "error": "${XRAY_LOG}/error.log"
-    },
-    "inbounds": [
-        ${inbounds}
-    ],
-    "outbounds": [
-        {
-            "protocol": "freedom",
-            "tag": "direct"
-        },
-        {
-            "protocol": "blackhole",
-            "tag": "blocked"
-        }
-    ],
-    "routing": {
-        "domainStrategy": "AsIs",
-        "rules": [
-            {
-                "type": "field",
-                "outboundTag": "blocked",
-                "protocol": ["bittorrent"]
+    jq -n \
+        --arg access_log "${XRAY_LOG}/access.log" \
+        --arg error_log "${XRAY_LOG}/error.log" \
+        --argjson inbound "$inbound_json" \
+        '{
+            log: {
+                loglevel: "warning",
+                access: $access_log,
+                error: $error_log
+            },
+            inbounds: [$inbound],
+            outbounds: [
+                { protocol: "freedom", tag: "direct" },
+                { protocol: "blackhole", tag: "blocked" }
+            ],
+            routing: {
+                domainStrategy: "AsIs",
+                rules: [{
+                    type: "field",
+                    outboundTag: "blocked",
+                    protocol: ["bittorrent"]
+                }]
             }
-        ]
-    }
-}
-EOF
+        }' > "${XRAY_CONFIG}"
+
+    # 验证生成的配置
+    if command -v jq &>/dev/null; then
+        if ! jq . "${XRAY_CONFIG}" >/dev/null 2>&1; then
+            log_error "生成的配置 JSON 格式有误，请检查"
+            if [[ -f "${XRAY_CONFIG}.bak" ]]; then
+                cp "${XRAY_CONFIG}.bak" "${XRAY_CONFIG}"
+                log_info "已恢复备份配置"
+            fi
+            exit 1
+        fi
+    fi
+    if command -v ${XRAY_DIR}/xray &>/dev/null; then
+        if ! ${XRAY_DIR}/xray run -test -config "${XRAY_CONFIG}" >/dev/null 2>&1; then
+            log_warn "Xray 配置验证未通过，服务可能无法正常启动"
+        fi
+    fi
 
     # 保存安装信息
     cat > "${INSTALL_INFO}" <<EOF
@@ -830,11 +854,17 @@ PUBLIC_KEY=${public_key}
 SHORT_ID=${short_id}
 SERVER_IP=${server_ip}
 SNI=www.microsoft.com
+INSTALL_DATE="$(date '+%Y-%m-%d %H:%M:%S')"
+EOF
+
+    # CDN 模式额外保存域名和证书信息
+    if [[ "$mode" == "cdn" ]]; then
+        cat >> "${INSTALL_INFO}" <<EOF
 DOMAIN=${domain}
 CERT_FILE=${cert_file}
 KEY_FILE=${key_file}
-INSTALL_DATE="$(date '+%Y-%m-%d %H:%M:%S')"
 EOF
+    fi
 
     log_info "配置生成完成"
 }
@@ -884,23 +914,7 @@ update_xray() {
     fi
 
     local current_ver=$(${XRAY_DIR}/xray version 2>/dev/null | head -1 | awk '{print $2}')
-
-    # 获取最新版本（使用重定向方式，更可靠）
-    local latest_ver=""
-
-    # 方法1: 从 GitHub 重定向获取版本号
-    latest_ver=$(curl -sI -o /dev/null -w '%{redirect_url}' "${GITHUB_LATEST_URL}" 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-
-    # 方法2: 如果重定向失败，尝试 API
-    if [[ -z "$latest_ver" ]]; then
-        local api_response=$(curl -s ${GITHUB_API} 2>/dev/null)
-        if command -v jq &>/dev/null; then
-            latest_ver=$(echo "$api_response" | jq -r '.tag_name // empty' 2>/dev/null)
-        fi
-        if [[ -z "$latest_ver" ]]; then
-            latest_ver=$(echo "$api_response" | grep -o '"tag_name":"[^"]*"' | head -1 | cut -d'"' -f4)
-        fi
-    fi
+    local latest_ver=$(get_latest_version)
 
     log_info "当前版本: ${current_ver}"
     log_info "最新版本: ${latest_ver}"
@@ -991,16 +1005,16 @@ show_info() {
     # CDN 模式信息
     if [[ "$mode" == "cdn" ]]; then
         local cdn_address="${DOMAIN:-<YOUR_DOMAIN>}"
-        local ws_link="vless://${UUID}@${cdn_address}:443?encryption=none&security=tls&sni=${cdn_address}&fp=chrome&type=ws&host=${cdn_address}&path=%2Fvless#Xray-CDN"
+        local cdn_link="vless://${UUID}@${cdn_address}:443?encryption=none&security=tls&sni=${cdn_address}&fp=chrome&type=xhttp&host=${cdn_address}&path=%2Fvless-xhttp#Xray-CDN"
 
         echo ""
-        echo -e "${GREEN}[CDN 模式 - VLESS + WebSocket + Cloudflare]${NC}"
+        echo -e "${GREEN}[CDN 模式 - VLESS + XHTTP + Cloudflare]${NC}"
         echo ""
         echo -e "  ${BLUE}地址:${NC}   ${cdn_address}"
         echo -e "  ${BLUE}端口:${NC}   443"
         echo -e "  ${BLUE}UUID:${NC}   ${UUID}"
-        echo -e "  ${BLUE}传输:${NC}   ws"
-        echo -e "  ${BLUE}路径:${NC}   /vless"
+        echo -e "  ${BLUE}传输:${NC}   xhttp"
+        echo -e "  ${BLUE}路径:${NC}   /vless-xhttp"
         echo -e "  ${BLUE}TLS:${NC}    开启"
         echo -e "  ${BLUE}SNI:${NC}    ${cdn_address}"
         echo -e "  ${BLUE}证书:${NC}   ${CERT_FILE}"
@@ -1014,7 +1028,7 @@ show_info() {
         echo -e "${CYAN}--------------------------------------------${NC}"
         echo -e "${GREEN}CDN 分享链接:${NC}"
         echo ""
-        echo -e "${ws_link}"
+        echo -e "${cdn_link}"
         echo ""
 
         # 生成二维码（如果 qrencode 可用）
@@ -1022,7 +1036,7 @@ show_info() {
             echo -e "${CYAN}--------------------------------------------${NC}"
             echo -e "${GREEN}CDN 二维码:${NC}"
             echo ""
-            qrencode -t ANSIUTF8 "${ws_link}"
+            qrencode -t ANSIUTF8 "${cdn_link}"
         fi
     fi
 
@@ -1054,7 +1068,7 @@ show_usage() {
     echo "  install     安装 Xray-core 并生成配置"
     echo "              支持两种模式："
     echo "                1. 直连模式 (VLESS + Reality)"
-    echo "                2. CDN 模式 (VLESS + WebSocket + Cloudflare)"
+    echo "                2. CDN 模式 (VLESS + XHTTP + Cloudflare)"
     echo "  uninstall   卸载 Xray-core"
     echo "  status      查看服务状态"
     echo "  show        显示节点信息和分享链接"
@@ -1096,8 +1110,8 @@ main() {
 
             install_xray
             generate_config "$mode" "$domain"
-            install_service
             configure_firewall
+            install_service
             show_info
             ;;
         bbr)

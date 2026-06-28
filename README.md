@@ -7,7 +7,7 @@
 | 模式 | 协议 | 特点 | 适用场景 |
 |------|------|------|----------|
 | **直连模式** | VLESS + Reality | 速度快、延迟低、伪装强 | IP 稳定、追求性能 |
-| **CDN 模式** | VLESS + WebSocket + Cloudflare | 隐藏 IP、抗封锁 | IP 易被封、需要稳定 |
+| **CDN 模式** | VLESS + XHTTP + Cloudflare | 隐藏 IP、抗封锁 | IP 易被封、需要稳定 |
 
 ## 快速安装
 
@@ -113,7 +113,7 @@ proxies:
     client-fingerprint: chrome
 ```
 
-#### CDN 模式 (WebSocket)
+#### CDN 模式 (XHTTP)
 
 ```yaml
 proxies:
@@ -122,12 +122,12 @@ proxies:
     server: <你的域名>
     port: 443
     uuid: <UUID>
-    network: ws
+    network: xhttp
     tls: true
     udp: true
     servername: <你的域名>
-    ws-opts:
-      path: /vless
+    xhttp-opts:
+      path: /vless-xhttp
       headers:
         Host: <你的域名>
     client-fingerprint: chrome
@@ -157,7 +157,7 @@ proxies:
 }
 ```
 
-#### CDN 模式 (WebSocket)
+#### CDN 模式 (XHTTP)
 
 ```json
 {
@@ -171,8 +171,8 @@ proxies:
     "server_name": "<你的域名>"
   },
   "transport": {
-    "type": "ws",
-    "path": "/vless",
+    "type": "xhttp",
+    "path": "/vless-xhttp",
     "headers": {
       "Host": "<你的域名>"
     }
