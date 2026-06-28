@@ -813,9 +813,9 @@ generate_config() {
                     security: "reality",
                     realitySettings: {
                         show: false,
-                        dest: "www.microsoft.com:443",
+                        dest: "www.cloudflare.com:443",
                         xver: 0,
-                        serverNames: ["www.microsoft.com"],
+                        serverNames: ["www.cloudflare.com"],
                         privateKey: $private_key,
                         shortIds: [$short_id]
                     }
@@ -920,7 +920,7 @@ PUBLIC_KEY=${public_key}
 SHORT_ID=${short_id}
 SERVER_IP=${server_ip}
 SERVER_IPV6=${server_ipv6}
-SNI=www.microsoft.com
+SNI=www.cloudflare.com
 INSTALL_DATE="$(date '+%Y-%m-%d %H:%M:%S')"
 EOF
 
