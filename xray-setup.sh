@@ -771,10 +771,25 @@ generate_config() {
         log_warn "无法自动获取服务器 IPv4，请手动替换配置中的 <YOUR_SERVER_IP>"
     fi
 
-    # 获取服务器 IPv6
-    local server_ipv6=$(curl -s6 --connect-timeout 5 https://ifconfig.me 2>/dev/null || \
-                        curl -s6 --connect-timeout 5 https://api6.ipify.org 2>/dev/null || \
-                        curl -s6 --connect-timeout 5 https://ipinfo.io/ip 2>/dev/null)
+    # 获取服务器 IPv6（检测网卡绑定的公网地址）
+    local server_ipv6=""
+    local detected_ipv6=$(ip -6 addr show scope global 2>/dev/null | grep -oP 'inet6 \K[0-9a-f:]+' | grep -v '^fd\|^fe80\|^::1' | head -1)
+    if [[ -n "$detected_ipv6" ]]; then
+        server_ipv6="$detected_ipv6"
+        log_info "检测到公网 IPv6: ${server_ipv6}"
+    else
+        echo "" >&2
+        echo -e "${YELLOW}未检测到公网 IPv6（可能为 NAT 型服务器）${NC}" >&2
+        echo -e "${YELLOW}如有公网 IPv6 可手动输入以启用 IPv6 直连，直接回车跳过：${NC}" >&2
+        echo -n "公网 IPv6: " >&2
+        read manual_ipv6
+        if [[ -n "$manual_ipv6" ]]; then
+            server_ipv6="$manual_ipv6"
+            log_info "使用手动输入的 IPv6: ${server_ipv6}"
+        else
+            log_info "跳过 IPv6，仅启用 IPv4 直连"
+        fi
+    fi
 
     # 根据模式生成配置
     local inbound_json=""
