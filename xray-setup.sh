@@ -80,33 +80,36 @@ get_init_system() {
 # 安装依赖
 install_deps() {
     local pm=$(get_pm)
-    local missing=""
-    command -v unzip &>/dev/null || missing="unzip"
-    command -v curl &>/dev/null || missing="$missing curl"
-    command -v jq &>/dev/null || missing="$missing jq"
-    command -v openssl &>/dev/null || missing="$missing openssl"
-    command -v qrencode &>/dev/null || missing="$missing qrencode"
 
-    if [[ -z "$missing" ]]; then
+    # Alpine: 启用 community 仓库（qrencode 在 community 中）
+    if [[ "$pm" == "apk" ]]; then
+        if ! grep -q "community" /etc/apk/repositories 2>/dev/null; then
+            local ver=$(cat /etc/alpine-release 2>/dev/null | cut -d. -f1,2)
+            if [[ -n "$ver" ]]; then
+                echo "https://dl-cdn.alpinelinux.org/alpine/v${ver}/community" >> /etc/apk/repositories
+            fi
+        fi
+    fi
+
+    # 逐个检查并安装缺失依赖
+    local pkgs=""
+    command -v unzip &>/dev/null    || pkgs="$pkgs unzip"
+    command -v curl &>/dev/null     || pkgs="$pkgs curl"
+    command -v jq &>/dev/null       || pkgs="$pkgs jq"
+    command -v openssl &>/dev/null  || pkgs="$pkgs openssl"
+    command -v qrencode &>/dev/null || pkgs="$pkgs qrencode"
+
+    if [[ -z "$pkgs" ]]; then
         log_info "依赖已就绪"
     else
-        log_info "安装缺失依赖:${missing}..."
+        log_info "安装缺失依赖:${pkgs}..."
         case $pm in
-            apt)    apt-get update -qq && apt-get install -y -qq unzip curl jq openssl qrencode ;;
-            yum)    yum install -y -q unzip curl jq openssl qrencode ;;
-            dnf)    dnf install -y -q unzip curl jq openssl qrencode ;;
-            apk)
-            # 启用 community 仓库（qrencode 在 community 中）
-            if ! grep -q "community" /etc/apk/repositories 2>/dev/null; then
-                local ver=$(cat /etc/alpine-release 2>/dev/null | cut -d. -f1,2)
-                if [[ -n "$ver" ]]; then
-                    echo "https://dl-cdn.alpinelinux.org/alpine/v${ver}/community" >> /etc/apk/repositories
-                fi
-            fi
-            apk add --no-cache unzip curl jq openssl qrencode
-            ;;
-            pacman) pacman -Sy --noconfirm unzip curl jq openssl qrencode ;;
-            *)      log_warn "未知包管理器，请确保已安装 unzip curl jq openssl qrencode" ;;
+            apt)    apt-get update -qq && apt-get install -y -qq $pkgs ;;
+            yum)    yum install -y -q $pkgs ;;
+            dnf)    dnf install -y -q $pkgs ;;
+            apk)    apk add --no-cache $pkgs ;;
+            pacman) pacman -Sy --noconfirm $pkgs ;;
+            *)      log_warn "未知包管理器，请确保已安装:${pkgs}" ;;
         esac
     fi
 
@@ -244,7 +247,11 @@ generate_keys() {
 
 # 生成 short_id
 generate_short_id() {
-    openssl rand -hex 8
+    if command -v openssl &>/dev/null; then
+        openssl rand -hex 8
+    else
+        cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 16 | head -n 1
+    fi
 }
 
 # 获取 Cloudflare Origin 证书内容
