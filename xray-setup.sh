@@ -101,6 +101,9 @@ install_deps() {
 
     # 安装端口检测工具
     install_port_tools
+
+    # 安装防火墙
+    install_firewall
 }
 
 # 安装端口检测工具
@@ -112,6 +115,25 @@ install_port_tools() {
         dnf)    dnf install -y -q iproute net-tools lsof >/dev/null 2>&1 || true ;;
         apk)    apk add --no-cache iproute2 net-tools lsof >/dev/null 2>&1 || true ;;
         pacman) pacman -Sy --noconfirm iproute2 net-tools lsof >/dev/null 2>&1 || true ;;
+    esac
+}
+
+# 安装防火墙
+install_firewall() {
+    # 已有防火墙则跳过
+    if command -v ufw &>/dev/null || command -v firewall-cmd &>/dev/null || command -v iptables &>/dev/null; then
+        return 0
+    fi
+
+    local pm=$(get_pm)
+    log_info "未检测到防火墙，正在安装..."
+    case $pm in
+        apt)    apt-get install -y -qq ufw >/dev/null 2>&1 ;;
+        yum)    yum install -y -q firewalld >/dev/null 2>&1 ;;
+        dnf)    dnf install -y -q firewalld >/dev/null 2>&1 ;;
+        apk)    apk add --no-cache iptables >/dev/null 2>&1 ;;
+        pacman) pacman -Sy --noconfirm ufw >/dev/null 2>&1 ;;
+        *)      log_warn "未知包管理器，请手动安装防火墙" ;;
     esac
 }
 
@@ -625,7 +647,8 @@ RESTORE
         fi
         log_info "iptables 已放行 22 和 443 端口"
     else
-        log_warn "未检测到防火墙，跳过配置"
+        log_error "未检测到任何防火墙工具 (ufw/firewalld/iptables)，请手动安装后重试"
+        exit 1
     fi
 
     return 0
