@@ -1087,10 +1087,12 @@ show_info() {
     fi
 
     echo ""
-    echo -e "${CYAN}============================================${NC}"
-    echo -e "${YELLOW}提示: 安装 qrencode 可显示二维码${NC}"
-    echo -e "${CYAN}============================================${NC}"
-    echo ""
+    if ! command -v qrencode &>/dev/null; then
+        echo -e "${CYAN}============================================${NC}"
+        echo -e "${YELLOW}提示: 安装 qrencode 可显示二维码${NC}"
+        echo -e "${CYAN}============================================${NC}"
+        echo ""
+    fi
 }
 
 # 重启服务
