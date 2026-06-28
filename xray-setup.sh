@@ -762,14 +762,19 @@ generate_config() {
     local public_key=$(echo "$keys" | grep "Public" | awk '{print $NF}')
     local short_id=$(generate_short_id)
 
-    # 获取服务器 IP
+    # 获取服务器 IPv4
     local server_ip=$(curl -s4 --connect-timeout 5 https://ifconfig.me 2>/dev/null || \
                       curl -s4 --connect-timeout 5 https://api.ipify.org 2>/dev/null || \
                       curl -s4 --connect-timeout 5 https://ipinfo.io/ip 2>/dev/null)
     if [[ -z "$server_ip" ]]; then
         server_ip="<YOUR_SERVER_IP>"
-        log_warn "无法自动获取服务器 IP，请手动替换配置中的 <YOUR_SERVER_IP>"
+        log_warn "无法自动获取服务器 IPv4，请手动替换配置中的 <YOUR_SERVER_IP>"
     fi
+
+    # 获取服务器 IPv6
+    local server_ipv6=$(curl -s6 --connect-timeout 5 https://ifconfig.me 2>/dev/null || \
+                        curl -s6 --connect-timeout 5 https://api6.ipify.org 2>/dev/null || \
+                        curl -s6 --connect-timeout 5 https://ipinfo.io/ip 2>/dev/null)
 
     # 根据模式生成配置
     local inbound_json=""
@@ -781,7 +786,7 @@ generate_config() {
             --arg private_key "$private_key" \
             --arg short_id "$short_id" \
             '{
-                listen: "0.0.0.0",
+                listen: "::",
                 port: 443,
                 protocol: "vless",
                 settings: {
@@ -899,6 +904,7 @@ PRIVATE_KEY=${private_key}
 PUBLIC_KEY=${public_key}
 SHORT_ID=${short_id}
 SERVER_IP=${server_ip}
+SERVER_IPV6=${server_ipv6}
 SNI=www.microsoft.com
 INSTALL_DATE="$(date '+%Y-%m-%d %H:%M:%S')"
 EOF
@@ -1032,19 +1038,36 @@ show_info() {
         echo -e "  ${BLUE}SNI:${NC}    ${SNI}"
         echo -e "  ${BLUE}Flow:${NC}   xtls-rprx-vision"
         echo -e "  ${BLUE}SID:${NC}    ${SHORT_ID}"
+        echo -e "  ${BLUE}双栈:${NC}   已启用 (IPv4 + IPv6)"
         echo ""
         echo -e "${CYAN}--------------------------------------------${NC}"
-        echo -e "${GREEN}直连分享链接:${NC}"
+        echo -e "${GREEN}IPv4 分享链接:${NC}"
         echo ""
         echo -e "${reality_link}"
         echo ""
 
+        # IPv6 分享链接
+        if [[ -n "${SERVER_IPV6}" ]]; then
+            local reality_link_v6="vless://${UUID}@[${SERVER_IPV6}]:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#Xray-Reality-IPv6"
+            echo -e "${CYAN}--------------------------------------------${NC}"
+            echo -e "${GREEN}IPv6 分享链接:${NC}"
+            echo ""
+            echo -e "${reality_link_v6}"
+            echo ""
+        fi
+
         # 生成二维码（如果 qrencode 可用）
         if command -v qrencode &>/dev/null; then
             echo -e "${CYAN}--------------------------------------------${NC}"
-            echo -e "${GREEN}直连二维码:${NC}"
+            echo -e "${GREEN}IPv4 二维码:${NC}"
             echo ""
             qrencode -t ANSIUTF8 "${reality_link}"
+            if [[ -n "${SERVER_IPV6}" ]]; then
+                echo ""
+                echo -e "${GREEN}IPv6 二维码:${NC}"
+                echo ""
+                qrencode -t ANSIUTF8 "${reality_link_v6}"
+            fi
         fi
     fi
 
@@ -1068,8 +1091,14 @@ show_info() {
         echo ""
         echo -e "${YELLOW}Cloudflare 配置:${NC}"
         echo -e "  1. 添加 A 记录指向 ${SERVER_IP}"
-        echo -e "  2. 开启橙色云朵（代理）"
-        echo -e "  3. SSL/TLS 设置为 Full（不选 Strict）"
+        if [[ -n "${SERVER_IPV6}" ]]; then
+            echo -e "  2. 添加 AAAA 记录指向 ${SERVER_IPV6}"
+            echo -e "  3. 开启橙色云朵（代理）"
+            echo -e "  4. SSL/TLS 设置为 Full（不选 Strict）"
+        else
+            echo -e "  2. 开启橙色云朵（代理）"
+            echo -e "  3. SSL/TLS 设置为 Full（不选 Strict）"
+        fi
         echo ""
         echo -e "${CYAN}--------------------------------------------${NC}"
         echo -e "${GREEN}CDN 分享链接:${NC}"
