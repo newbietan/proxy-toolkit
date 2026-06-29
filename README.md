@@ -33,6 +33,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/newbietan/proxy-toolkit/main
 1. 拥有一个域名
 2. 域名 NS 已切换到 Cloudflare
 3. 在 Cloudflare 添加 A 记录指向服务器 IP
+4. 在 Cloudflare 申请 Origin 证书（SSL/TLS → 源服务器 → 创建证书）
 
 ## 卸载
 
@@ -59,8 +60,9 @@ xray-setup.sh icmp        # 开启 ICMP (允许 ping)
 
 - 服务器地址、端口、UUID
 - 公钥、Short ID（直连模式）
+- IPv6 分享链接（直连模式，如检测到公网 IPv6）
 - 域名、路径、证书位置（CDN 模式）
-- VLESS 分享链接（可直接导入客户端）
+- VLESS 分享链接和二维码（可直接导入客户端）
 
 ### CDN 模式额外配置
 
@@ -82,7 +84,8 @@ xray-setup.sh icmp        # 开启 ICMP (允许 ping)
 安装完成后，在 Cloudflare 控制面板进行以下配置：
 
 1. **添加 A 记录**：指向服务器 IP，开启橙色云朵（代理）
-2. **SSL/TLS 设置**：选择 "Full"（不要选 "Full (Strict)"）
+2. **添加 AAAA 记录**（可选）：如服务器有公网 IPv6，添加 AAAA 记录指向 IPv6 地址
+3. **SSL/TLS 设置**：选择 "Full"（不要选 "Full (Strict)"）
 
 ## 客户端配置
 
@@ -106,7 +109,7 @@ proxies:
     tls: true
     udp: true
     flow: xtls-rprx-vision
-    servername: www.microsoft.com
+    servername: www.cloudflare.com
     reality-opts:
       public-key: <公钥>
       short-id: <Short ID>
@@ -147,7 +150,7 @@ proxies:
   "flow": "xtls-rprx-vision",
   "tls": {
     "enabled": true,
-    "server_name": "www.microsoft.com",
+    "server_name": "www.cloudflare.com",
     "reality": {
       "enabled": true,
       "public_key": "<公钥>",
@@ -218,7 +221,8 @@ proxies:
 - **开机启动**: 自动配置开机启动（支持所有 init 系统）
 - **BBR**: 自动开启 BBR 拥塞控制，提升网络性能
 - **ICMP**: 自动开启 ICMP，允许 ping 测试
-- **依赖工具**: 自动安装端口检测工具（iproute2/net-tools/lsof）
+- **依赖工具**: 自动安装端口检测工具（iproute2/net-tools/lsof）及 openssl、qrencode
+- **配置备份**: 重新安装时自动备份旧配置到 `config.json.bak`
 - **版本获取**: 自动获取最新 Xray-core 版本（兼容 Alpine Linux）
 
 ## 常见问题
