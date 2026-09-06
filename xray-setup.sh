@@ -27,6 +27,17 @@ log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+# JSON 字符串转义（纯 bash 实现，不依赖 jq，兼容 Alpine/busybox）
+json_escape() {
+    local s="$1"
+    s=${s//\\/\\\\}
+    s=${s//\"/\\\"}
+    s=${s//$'\n'/\\n}
+    s=${s//$'\t'/\\t}
+    s=${s//$'\r'/\\r}
+    printf '%s' "$s"
+}
+
 check_root() {
     if [[ $EUID -ne 0 ]]; then
         log_error "请使用 root 用户运行此脚本"
@@ -38,12 +49,15 @@ check_root() {
 get_arch() {
     local arch=$(uname -m)
     case $arch in
-        x86_64|amd64)   echo "64" ;;
-        aarch64|arm64)   echo "arm64-v8a" ;;
-        armv7l|armhf)    echo "arm32-v7a" ;;
-        armv6l)          echo "arm32-v6" ;;
-        s390x)           echo "s390x" ;;
-        *)               log_error "不支持的架构: $arch"; exit 1 ;;
+    x86_64 | amd64) echo "64" ;;
+    aarch64 | arm64) echo "arm64-v8a" ;;
+    armv7l | armhf) echo "arm32-v7a" ;;
+    armv6l) echo "arm32-v6" ;;
+    s390x) echo "s390x" ;;
+    *)
+        log_error "不支持的架构: $arch"
+        exit 1
+        ;;
     esac
 }
 
@@ -77,40 +91,85 @@ get_init_system() {
     fi
 }
 
+# 确保 Alpine community 仓库已启用（qrencode 位于 community 仓库）
+ensure_alpine_community_repo() {
+    if grep -q "community" /etc/apk/repositories 2>/dev/null; then
+        return 0
+    fi
+
+    local ver=$(cat /etc/alpine-release 2>/dev/null | cut -d. -f1,2)
+    if [[ -z "$ver" ]]; then
+        ver=$(awk -F. '/^[0-9]+\.[0-9]+/{print $1"."$2; exit}' /etc/os-release 2>/dev/null)
+    fi
+
+    if [[ -n "$ver" ]]; then
+        echo "https://dl-cdn.alpinelinux.org/alpine/v${ver}/community" >>/etc/apk/repositories
+        apk update >/dev/null 2>&1 || true
+        log_info "已启用 Alpine community 仓库 (v${ver})"
+    else
+        log_warn "无法确定 Alpine 版本，跳过 community 仓库配置"
+    fi
+}
+
+# 安装软件包
+# apk 逐个安装：避免某个包（如 qrencode）安装失败导致 jq 等必需包整体失败
+install_packages() {
+    local pm="$1"
+    shift
+    local pkgs="$*"
+
+    case $pm in
+    apt) apt-get update -qq && apt-get install -y -qq $pkgs ;;
+    yum) yum install -y -q $pkgs ;;
+    dnf) dnf install -y -q $pkgs ;;
+    apk)
+        for p in $pkgs; do
+            if ! apk add --no-cache "$p" >/dev/null 2>&1; then
+                log_warn "依赖安装失败: ${p}"
+            fi
+        done
+        ;;
+    pacman) pacman -Sy --noconfirm $pkgs ;;
+    *) log_warn "未知包管理器，请确保已安装:${pkgs}" ;;
+    esac
+}
+
 # 安装依赖
 install_deps() {
     local pm=$(get_pm)
 
     # Alpine: 启用 community 仓库（qrencode 在 community 中）
     if [[ "$pm" == "apk" ]]; then
-        if ! grep -q "community" /etc/apk/repositories 2>/dev/null; then
-            local ver=$(cat /etc/alpine-release 2>/dev/null | cut -d. -f1,2)
-            if [[ -n "$ver" ]]; then
-                echo "https://dl-cdn.alpinelinux.org/alpine/v${ver}/community" >> /etc/apk/repositories
-            fi
-        fi
+        ensure_alpine_community_repo
     fi
 
     # 逐个检查并安装缺失依赖
     local pkgs=""
-    command -v unzip &>/dev/null    || pkgs="$pkgs unzip"
-    command -v curl &>/dev/null     || pkgs="$pkgs curl"
-    command -v jq &>/dev/null       || pkgs="$pkgs jq"
-    command -v openssl &>/dev/null  || pkgs="$pkgs openssl"
+    command -v unzip &>/dev/null || pkgs="$pkgs unzip"
+    command -v curl &>/dev/null || pkgs="$pkgs curl"
+    command -v jq &>/dev/null || pkgs="$pkgs jq"
+    command -v openssl &>/dev/null || pkgs="$pkgs openssl"
     command -v qrencode &>/dev/null || pkgs="$pkgs qrencode"
 
     if [[ -z "$pkgs" ]]; then
         log_info "依赖已就绪"
     else
         log_info "安装缺失依赖:${pkgs}..."
-        case $pm in
-            apt)    apt-get update -qq && apt-get install -y -qq $pkgs ;;
-            yum)    yum install -y -q $pkgs ;;
-            dnf)    dnf install -y -q $pkgs ;;
-            apk)    apk add --no-cache $pkgs ;;
-            pacman) pacman -Sy --noconfirm $pkgs ;;
-            *)      log_warn "未知包管理器，请确保已安装:${pkgs}" ;;
-        esac
+        install_packages "$pm" "$pkgs"
+    fi
+
+    # 验证关键依赖（unzip/curl/openssl 必需；jq/qrencode 可选）
+    local critical_missing=""
+    command -v unzip &>/dev/null || critical_missing="$critical_missing unzip"
+    command -v curl &>/dev/null || critical_missing="$critical_missing curl"
+    command -v openssl &>/dev/null || critical_missing="$critical_missing openssl"
+    if [[ -n "$critical_missing" ]]; then
+        log_error "关键依赖安装失败:${critical_missing}"
+        log_error "请检查网络连接和软件源配置后重试"
+        exit 1
+    fi
+    if ! command -v jq &>/dev/null; then
+        log_warn "jq 不可用，配置将使用内置生成逻辑（不依赖 jq）"
     fi
 
     # 安装端口检测工具
@@ -124,11 +183,11 @@ install_deps() {
 install_port_tools() {
     local pm=$(get_pm)
     case $pm in
-        apt)    apt-get install -y -qq iproute2 net-tools lsof >/dev/null 2>&1 || true ;;
-        yum)    yum install -y -q iproute net-tools lsof >/dev/null 2>&1 || true ;;
-        dnf)    dnf install -y -q iproute net-tools lsof >/dev/null 2>&1 || true ;;
-        apk)    apk add --no-cache iproute2 net-tools lsof >/dev/null 2>&1 || true ;;
-        pacman) pacman -Sy --noconfirm iproute2 net-tools lsof >/dev/null 2>&1 || true ;;
+    apt) apt-get install -y -qq iproute2 net-tools lsof >/dev/null 2>&1 || true ;;
+    yum) yum install -y -q iproute net-tools lsof >/dev/null 2>&1 || true ;;
+    dnf) dnf install -y -q iproute net-tools lsof >/dev/null 2>&1 || true ;;
+    apk) apk add --no-cache iproute2 net-tools lsof >/dev/null 2>&1 || true ;;
+    pacman) pacman -Sy --noconfirm iproute2 net-tools lsof >/dev/null 2>&1 || true ;;
     esac
 }
 
@@ -142,12 +201,12 @@ install_firewall() {
     local pm=$(get_pm)
     log_info "未检测到防火墙，正在安装..."
     case $pm in
-        apt)    apt-get install -y -qq ufw >/dev/null 2>&1 ;;
-        yum)    yum install -y -q firewalld >/dev/null 2>&1 ;;
-        dnf)    dnf install -y -q firewalld >/dev/null 2>&1 ;;
-        apk)    apk add --no-cache iptables >/dev/null 2>&1 ;;
-        pacman) pacman -Sy --noconfirm ufw >/dev/null 2>&1 ;;
-        *)      log_warn "未知包管理器，请手动安装防火墙" ;;
+    apt) apt-get install -y -qq ufw >/dev/null 2>&1 ;;
+    yum) yum install -y -q firewalld >/dev/null 2>&1 ;;
+    dnf) dnf install -y -q firewalld >/dev/null 2>&1 ;;
+    apk) apk add --no-cache iptables >/dev/null 2>&1 ;;
+    pacman) pacman -Sy --noconfirm ufw >/dev/null 2>&1 ;;
+    *) log_warn "未知包管理器，请手动安装防火墙" ;;
     esac
 
     # 验证安装结果
@@ -170,7 +229,7 @@ check_port() {
     elif command -v ss &>/dev/null; then
         local ss_output=$(ss -tlnp 2>/dev/null | grep ":${port} " || true)
         if [[ -n "$ss_output" ]]; then
-            pid=$(echo "$ss_output" | grep -oP 'pid=\K[0-9]+' | grep -v "^1$" | head -1)
+            pid=$(echo "$ss_output" | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | grep -v "^1$" | head -1)
         fi
     elif command -v netstat &>/dev/null; then
         pid=$(netstat -tlnp 2>/dev/null | grep ":${port} " | awk '{print $7}' | cut -d'/' -f1 | grep -v "^1$" | head -1)
@@ -195,32 +254,32 @@ check_port() {
         log_warn "端口 ${port} 被进程 ${process_name} (PID: ${pid}) 占用"
 
         case "$process_name" in
-            nginx|apache2|httpd|caddy|lighttpd)
-                log_info "停止 ${process_name} 服务..."
-                if command -v systemctl &>/dev/null; then
-                    systemctl stop ${process_name} 2>/dev/null || true
-                    systemctl disable ${process_name} 2>/dev/null || true
-                elif command -v service &>/dev/null; then
-                    service ${process_name} stop 2>/dev/null || true
-                fi
-                log_info "${process_name} 已停止"
-                ;;
-            xray)
-                log_info "停止已运行的 Xray..."
+        nginx | apache2 | httpd | caddy | lighttpd)
+            log_info "停止 ${process_name} 服务..."
+            if command -v systemctl &>/dev/null; then
+                systemctl stop ${process_name} 2>/dev/null || true
+                systemctl disable ${process_name} 2>/dev/null || true
+            elif command -v service &>/dev/null; then
+                service ${process_name} stop 2>/dev/null || true
+            fi
+            log_info "${process_name} 已停止"
+            ;;
+        xray)
+            log_info "停止已运行的 Xray..."
+            kill ${pid} 2>/dev/null || true
+            sleep 1
+            ;;
+        *)
+            read -p "是否终止进程 ${process_name} (PID: ${pid})? (y/N): " confirm
+            if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
                 kill ${pid} 2>/dev/null || true
                 sleep 1
-                ;;
-            *)
-                read -p "是否终止进程 ${process_name} (PID: ${pid})? (y/N): " confirm
-                if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
-                    kill ${pid} 2>/dev/null || true
-                    sleep 1
-                    log_info "进程已终止"
-                else
-                    log_error "端口 ${port} 被占用，请手动处理或修改配置使用其他端口"
-                    exit 1
-                fi
-                ;;
+                log_info "进程已终止"
+            else
+                log_error "端口 ${port} 被占用，请手动处理或修改配置使用其他端口"
+                exit 1
+            fi
+            ;;
         esac
     else
         log_info "端口 ${port} 可用"
@@ -234,9 +293,9 @@ generate_uuid() {
     elif command -v uuidgen &>/dev/null; then
         uuidgen | tr '[:upper:]' '[:lower:]'
     else
-        cat /proc/sys/kernel/random/uuid 2>/dev/null || \
-        python3 -c "import uuid; print(uuid.uuid4())" 2>/dev/null || \
-        echo "$(cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 8 | head -n 1)-$(cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 4 | head -n 1)-$(cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 4 | head -n 1)-$(cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 4 | head -n 1)-$(cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 12 | head -n 1)"
+        cat /proc/sys/kernel/random/uuid 2>/dev/null ||
+            python3 -c "import uuid; print(uuid.uuid4())" 2>/dev/null ||
+            echo "$(cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 8 | head -n 1)-$(cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 4 | head -n 1)-$(cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 4 | head -n 1)-$(cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 4 | head -n 1)-$(cat /dev/urandom | tr -dc 'a-f0-9' | fold -w 12 | head -n 1)"
     fi
 }
 
@@ -289,7 +348,7 @@ get_cert_content() {
     fi
 
     # 保存证书
-    echo "$cert_content" > "${cert_dir}/cert.pem"
+    echo "$cert_content" >"${cert_dir}/cert.pem"
     log_info "证书已保存到 ${cert_dir}/cert.pem" >&2
 
     echo "" >&2
@@ -304,7 +363,7 @@ get_cert_content() {
     fi
 
     # 保存私钥
-    echo "$key_content" > "${cert_dir}/private.key"
+    echo "$key_content" >"${cert_dir}/private.key"
     log_info "私钥已保存到 ${cert_dir}/private.key" >&2
 
     echo "${cert_dir}/cert.pem|${cert_dir}/private.key"
@@ -329,9 +388,9 @@ select_mode() {
     read mode_choice
 
     case "$mode_choice" in
-        1) echo "direct" ;;
-        2) echo "cdn" ;;
-        *) echo "direct" ;;
+    1) echo "direct" ;;
+    2) echo "cdn" ;;
+    *) echo "direct" ;;
     esac
 }
 
@@ -364,7 +423,7 @@ get_domain() {
 install_systemd_service() {
     log_info "安装 systemd 服务..."
 
-    cat > /etc/systemd/system/${SERVICE_NAME}.service <<EOF
+    cat >/etc/systemd/system/${SERVICE_NAME}.service <<EOF
 [Unit]
 Description=Xray Service
 After=network.target nss-lookup.target
@@ -395,7 +454,7 @@ install_openrc_service() {
     # 创建 PID 文件目录
     mkdir -p /run
 
-    cat > /etc/init.d/${SERVICE_NAME} <<'SCRIPT'
+    cat >/etc/init.d/${SERVICE_NAME} <<'SCRIPT'
 #!/sbin/openrc-run
 
 name="xray"
@@ -445,20 +504,20 @@ install_nohup_service() {
 
     log_info "使用 nohup 启动服务..."
 
-    nohup ${XRAY_DIR}/xray run -config ${XRAY_CONFIG} > ${XRAY_LOG}/xray.log 2>&1 &
-    echo $! > ${PID_FILE}
+    nohup ${XRAY_DIR}/xray run -config ${XRAY_CONFIG} >${XRAY_LOG}/xray.log 2>&1 &
+    echo $! >${PID_FILE}
 
     log_info "服务已启动 (PID: $(cat ${PID_FILE}))"
 
     # 创建启动脚本
-    cat > /usr/local/bin/xray-start <<EOF
+    cat >/usr/local/bin/xray-start <<EOF
 #!/bin/bash
 nohup ${XRAY_DIR}/xray run -config ${XRAY_CONFIG} > ${XRAY_LOG}/xray.log 2>&1 &
 echo \$! > ${PID_FILE}
 echo "Xray started (PID: \$(cat ${PID_FILE}))"
 EOF
 
-    cat > /usr/local/bin/xray-stop <<EOF
+    cat >/usr/local/bin/xray-stop <<EOF
 #!/bin/bash
 if [[ -f ${PID_FILE} ]]; then
     kill \$(cat ${PID_FILE}) 2>/dev/null
@@ -485,15 +544,15 @@ install_service() {
     log_info "检测到 init 系统: ${init_system}"
 
     case ${init_system} in
-        systemd)
-            install_systemd_service
-            ;;
-        openrc)
-            install_openrc_service
-            ;;
-        *)
-            install_nohup_service
-            ;;
+    systemd)
+        install_systemd_service
+        ;;
+    openrc)
+        install_openrc_service
+        ;;
+    *)
+        install_nohup_service
+        ;;
     esac
 }
 
@@ -502,23 +561,23 @@ stop_service() {
     local init_system=$(get_init_system)
 
     case ${init_system} in
-        systemd)
-            systemctl stop ${SERVICE_NAME} 2>/dev/null || true
-            ;;
-        openrc)
-            rc-service ${SERVICE_NAME} stop 2>/dev/null || true
-            ;;
-        *)
-            if [[ -f ${PID_FILE} ]]; then
-                kill $(cat ${PID_FILE}) 2>/dev/null || true
-                rm -f ${PID_FILE}
-            fi
-            # 兜底: 清理可能残留的 xray 进程
-            local residual_pid=$(pgrep -x xray 2>/dev/null | head -1)
-            if [[ -n "$residual_pid" ]]; then
-                kill ${residual_pid} 2>/dev/null || true
-            fi
-            ;;
+    systemd)
+        systemctl stop ${SERVICE_NAME} 2>/dev/null || true
+        ;;
+    openrc)
+        rc-service ${SERVICE_NAME} stop 2>/dev/null || true
+        ;;
+    *)
+        if [[ -f ${PID_FILE} ]]; then
+            kill $(cat ${PID_FILE}) 2>/dev/null || true
+            rm -f ${PID_FILE}
+        fi
+        # 兜底: 清理可能残留的 xray 进程
+        local residual_pid=$(pgrep -x xray 2>/dev/null | head -1)
+        if [[ -n "$residual_pid" ]]; then
+            kill ${residual_pid} 2>/dev/null || true
+        fi
+        ;;
     esac
 }
 
@@ -527,16 +586,16 @@ start_service() {
     local init_system=$(get_init_system)
 
     case ${init_system} in
-        systemd)
-            systemctl start ${SERVICE_NAME} 2>/dev/null || true
-            ;;
-        openrc)
-            rc-service ${SERVICE_NAME} start 2>/dev/null || true
-            ;;
-        *)
-            nohup ${XRAY_DIR}/xray run -config ${XRAY_CONFIG} > ${XRAY_LOG}/xray.log 2>&1 &
-            echo $! > ${PID_FILE}
-            ;;
+    systemd)
+        systemctl start ${SERVICE_NAME} 2>/dev/null || true
+        ;;
+    openrc)
+        rc-service ${SERVICE_NAME} start 2>/dev/null || true
+        ;;
+    *)
+        nohup ${XRAY_DIR}/xray run -config ${XRAY_CONFIG} >${XRAY_LOG}/xray.log 2>&1 &
+        echo $! >${PID_FILE}
+        ;;
     esac
 }
 
@@ -545,19 +604,19 @@ is_running() {
     local init_system=$(get_init_system)
 
     case ${init_system} in
-        systemd)
-            systemctl is-active --quiet ${SERVICE_NAME} 2>/dev/null
-            ;;
-        openrc)
-            rc-service ${SERVICE_NAME} status 2>/dev/null | grep -q "started"
-            ;;
-        *)
-            if [[ -f ${PID_FILE} ]]; then
-                kill -0 $(cat ${PID_FILE}) 2>/dev/null
-            else
-                return 1
-            fi
-            ;;
+    systemd)
+        systemctl is-active --quiet ${SERVICE_NAME} 2>/dev/null
+        ;;
+    openrc)
+        rc-service ${SERVICE_NAME} status 2>/dev/null | grep -q "started"
+        ;;
+    *)
+        if [[ -f ${PID_FILE} ]]; then
+            kill -0 $(cat ${PID_FILE}) 2>/dev/null
+        else
+            return 1
+        fi
+        ;;
     esac
 }
 
@@ -588,7 +647,7 @@ enable_bbr() {
     modprobe tcp_bbr 2>/dev/null || true
 
     # 配置 BBR
-    cat > /etc/sysctl.d/99-bbr.conf <<EOF
+    cat >/etc/sysctl.d/99-bbr.conf <<EOF
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 EOF
@@ -617,10 +676,10 @@ enable_icmp() {
     fi
 
     # 开启 ICMP
-    echo 0 > /proc/sys/net/ipv4/icmp_echo_ignore_all
+    echo 0 >/proc/sys/net/ipv4/icmp_echo_ignore_all
 
     # 持久化
-    cat > /etc/sysctl.d/99-icmp.conf <<EOF
+    cat >/etc/sysctl.d/99-icmp.conf <<EOF
 net.ipv4.icmp_echo_ignore_all = 0
 EOF
 
@@ -652,17 +711,17 @@ configure_firewall() {
     elif command -v iptables &>/dev/null; then
         # 通用 iptables
         log_info "检测到 iptables 防火墙"
-        iptables -C INPUT -p tcp --dport 22 -j ACCEPT 2>/dev/null || \
+        iptables -C INPUT -p tcp --dport 22 -j ACCEPT 2>/dev/null ||
             iptables -I INPUT -p tcp --dport 22 -j ACCEPT
-        iptables -C INPUT -p tcp --dport 443 -j ACCEPT 2>/dev/null || \
+        iptables -C INPUT -p tcp --dport 443 -j ACCEPT 2>/dev/null ||
             iptables -I INPUT -p tcp --dport 443 -j ACCEPT
         # 持久化
         if command -v iptables-save &>/dev/null; then
-            iptables-save > /etc/iptables.rules 2>/dev/null || true
+            iptables-save >/etc/iptables.rules 2>/dev/null || true
         fi
         # 创建开机恢复脚本
         if [[ -d /etc/network/if-pre-up.d ]]; then
-            cat > /etc/network/if-pre-up.d/iptables-restore <<'RESTORE'
+            cat >/etc/network/if-pre-up.d/iptables-restore <<'RESTORE'
 #!/bin/sh
 iptables-restore < /etc/iptables.rules 2>/dev/null
 RESTORE
@@ -736,7 +795,7 @@ install_xray() {
 
     log_info "Xray-core ${latest_ver} 安装完成"
     mkdir -p "${XRAY_CONFIG_DIR}"
-    echo "$latest_ver" > "${XRAY_CONFIG_DIR}/version.txt" 2>/dev/null || true
+    echo "$latest_ver" >"${XRAY_CONFIG_DIR}/version.txt" 2>/dev/null || true
 }
 
 # 生成配置
@@ -763,9 +822,9 @@ generate_config() {
     local short_id=$(generate_short_id)
 
     # 获取服务器 IPv4
-    local server_ip=$(curl -s4 --connect-timeout 5 https://ifconfig.me 2>/dev/null || \
-                      curl -s4 --connect-timeout 5 https://api.ipify.org 2>/dev/null || \
-                      curl -s4 --connect-timeout 5 https://ipinfo.io/ip 2>/dev/null)
+    local server_ip=$(curl -s4 --connect-timeout 5 https://ifconfig.me 2>/dev/null ||
+        curl -s4 --connect-timeout 5 https://api.ipify.org 2>/dev/null ||
+        curl -s4 --connect-timeout 5 https://ipinfo.io/ip 2>/dev/null)
     if [[ -z "$server_ip" ]]; then
         server_ip="<YOUR_SERVER_IP>"
         log_warn "无法自动获取服务器 IPv4，请手动替换配置中的 <YOUR_SERVER_IP>"
@@ -773,7 +832,7 @@ generate_config() {
 
     # 获取服务器 IPv6（检测网卡绑定的公网地址）
     local server_ipv6=""
-    local detected_ipv6=$(ip -6 addr show scope global 2>/dev/null | grep -oP 'inet6 \K[0-9a-f:]+' | grep -v '^fd\|^fe80\|^::1' | head -1)
+    local detected_ipv6=$(ip -6 addr show scope global 2>/dev/null | sed -n 's/.*inet6 \([0-9a-fA-F:][0-9a-fA-F:]*\).*/\1/p' | grep -Evi '^(fd|fe80|::1)' | head -1)
     if [[ -n "$detected_ipv6" ]]; then
         server_ipv6="$detected_ipv6"
         log_info "检测到公网 IPv6: ${server_ipv6}"
@@ -791,40 +850,40 @@ generate_config() {
         fi
     fi
 
-    # 根据模式生成配置
+    # 根据模式生成配置（内置 JSON 生成，不依赖 jq，兼容 Alpine）
     local inbound_json=""
 
     # 直连模式 (Reality)
     if [[ "$mode" == "direct" ]]; then
-        inbound_json=$(jq -n \
-            --arg uuid "$uuid" \
-            --arg private_key "$private_key" \
-            --arg short_id "$short_id" \
-            '{
-                listen: "::",
-                port: 443,
-                protocol: "vless",
-                settings: {
-                    clients: [{ id: $uuid, flow: "xtls-rprx-vision" }],
-                    decryption: "none"
-                },
-                streamSettings: {
-                    network: "tcp",
-                    security: "reality",
-                    realitySettings: {
-                        show: false,
-                        dest: "www.cloudflare.com:443",
-                        xver: 0,
-                        serverNames: ["www.cloudflare.com"],
-                        privateKey: $private_key,
-                        shortIds: [$short_id]
-                    }
-                },
-                sniffing: {
-                    enabled: true,
-                    destOverride: ["http", "tls", "quic"]
-                }
-            }')
+        inbound_json=$(
+            cat <<EOF
+{
+  "listen": "::",
+  "port": 443,
+  "protocol": "vless",
+  "settings": {
+    "clients": [{"id": "$(json_escape "$uuid")", "flow": "xtls-rprx-vision"}],
+    "decryption": "none"
+  },
+  "streamSettings": {
+    "network": "tcp",
+    "security": "reality",
+    "realitySettings": {
+      "show": false,
+      "dest": "www.cloudflare.com:443",
+      "xver": 0,
+      "serverNames": ["www.cloudflare.com"],
+      "privateKey": "$(json_escape "$private_key")",
+      "shortIds": ["$(json_escape "$short_id")"]
+    }
+  },
+  "sniffing": {
+    "enabled": true,
+    "destOverride": ["http", "tls", "quic"]
+  }
+}
+EOF
+        )
     fi
 
     # CDN 模式 (XHTTP + TLS)
@@ -835,75 +894,79 @@ generate_config() {
         local cert_file=$(echo "$cert_paths" | cut -d'|' -f1)
         local key_file=$(echo "$cert_paths" | cut -d'|' -f2)
 
-        inbound_json=$(jq -n \
-            --arg uuid "$uuid" \
-            --arg cert_file "$cert_file" \
-            --arg key_file "$key_file" \
-            --argjson port "$cdn_port" \
-            '{
-                listen: "0.0.0.0",
-                port: $port,
-                protocol: "vless",
-                settings: {
-                    clients: [{ id: $uuid }],
-                    decryption: "none"
-                },
-                streamSettings: {
-                    network: "xhttp",
-                    security: "tls",
-                    tlsSettings: {
-                        certificates: [{
-                            certificateFile: $cert_file,
-                            keyFile: $key_file
-                        }]
-                    },
-                    xhttpSettings: {
-                        path: "/vless-xhttp"
-                    }
-                },
-                sniffing: {
-                    enabled: true,
-                    destOverride: ["http", "tls", "quic"]
-                }
-            }')
+        inbound_json=$(
+            cat <<EOF
+{
+  "listen": "0.0.0.0",
+  "port": ${cdn_port},
+  "protocol": "vless",
+  "settings": {
+    "clients": [{"id": "$(json_escape "$uuid")"}],
+    "decryption": "none"
+  },
+  "streamSettings": {
+    "network": "xhttp",
+    "security": "tls",
+    "tlsSettings": {
+      "certificates": [{
+        "certificateFile": "$(json_escape "$cert_file")",
+        "keyFile": "$(json_escape "$key_file")"
+      }]
+    },
+    "xhttpSettings": {
+      "path": "/vless-xhttp"
+    }
+  },
+  "sniffing": {
+    "enabled": true,
+    "destOverride": ["http", "tls", "quic"]
+  }
+}
+EOF
+        )
     fi
 
     # 生成配置文件
-    jq -n \
-        --arg access_log "${XRAY_LOG}/access.log" \
-        --arg error_log "${XRAY_LOG}/error.log" \
-        --argjson inbound "$inbound_json" \
-        '{
-            log: {
-                loglevel: "warning",
-                access: $access_log,
-                error: $error_log
-            },
-            inbounds: [$inbound],
-            outbounds: [
-                { protocol: "freedom", tag: "direct" },
-                { protocol: "blackhole", tag: "blocked" }
-            ],
-            routing: {
-                domainStrategy: "AsIs",
-                rules: [{
-                    type: "field",
-                    outboundTag: "blocked",
-                    protocol: ["bittorrent"]
-                }]
-            }
-        }' > "${XRAY_CONFIG}"
+    cat >"${XRAY_CONFIG}" <<EOF
+{
+  "log": {
+    "loglevel": "warning",
+    "access": "$(json_escape "${XRAY_LOG}/access.log")",
+    "error": "$(json_escape "${XRAY_LOG}/error.log")"
+  },
+  "inbounds": [${inbound_json}],
+  "outbounds": [
+    {"protocol": "freedom", "tag": "direct"},
+    {"protocol": "blackhole", "tag": "blocked"}
+  ],
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": [{
+      "type": "field",
+      "outboundTag": "blocked",
+      "protocol": ["bittorrent"]
+    }]
+  }
+}
+EOF
 
     # 验证生成的配置
+    local config_ok=1
     if command -v jq &>/dev/null; then
-        if ! jq . "${XRAY_CONFIG}" >/dev/null 2>&1; then
-            log_error "生成的配置 JSON 格式有误，请检查"
-            if [[ -f "${XRAY_CONFIG}.bak" ]]; then
-                cp "${XRAY_CONFIG}.bak" "${XRAY_CONFIG}"
-                log_info "已恢复备份配置"
-            fi
-            exit 1
+        jq . "${XRAY_CONFIG}" >/dev/null 2>&1 && config_ok=0
+    else
+        # jq 不可用时的简易校验（兼容 Alpine/busybox）
+        if [[ -s "${XRAY_CONFIG}" ]] && grep -q '"inbounds"' "${XRAY_CONFIG}"; then
+            config_ok=0
         fi
+    fi
+    if [[ $config_ok -ne 0 ]]; then
+        log_error "生成的配置 JSON 格式有误，请检查"
+        if [[ -f "${XRAY_CONFIG}.bak" ]]; then
+            cp "${XRAY_CONFIG}.bak" "${XRAY_CONFIG}"
+            log_info "已恢复备份配置"
+        fi
+        exit 1
     fi
     if command -v ${XRAY_DIR}/xray &>/dev/null; then
         if ! ${XRAY_DIR}/xray run -test -config "${XRAY_CONFIG}" >/dev/null 2>&1; then
@@ -912,7 +975,7 @@ generate_config() {
     fi
 
     # 保存安装信息
-    cat > "${INSTALL_INFO}" <<EOF
+    cat >"${INSTALL_INFO}" <<EOF
 DEPLOY_MODE=${mode}
 UUID=${uuid}
 PRIVATE_KEY=${private_key}
@@ -926,7 +989,7 @@ EOF
 
     # CDN 模式额外保存域名和证书信息
     if [[ "$mode" == "cdn" ]]; then
-        cat >> "${INSTALL_INFO}" <<EOF
+        cat >>"${INSTALL_INFO}" <<EOF
 DOMAIN=${domain}
 CERT_FILE=${cert_file}
 KEY_FILE=${key_file}
@@ -951,18 +1014,18 @@ uninstall_xray() {
     # 删除服务文件
     local init_system=$(get_init_system)
     case ${init_system} in
-        systemd)
-            rm -f /etc/systemd/system/${SERVICE_NAME}.service
-            systemctl daemon-reload 2>/dev/null || true
-            ;;
-        openrc)
-            rc-update del ${SERVICE_NAME} 2>/dev/null || true
-            rm -f /etc/init.d/${SERVICE_NAME}
-            ;;
-        *)
-            rm -f /usr/local/bin/xray-start /usr/local/bin/xray-stop
-            rm -f ${PID_FILE}
-            ;;
+    systemd)
+        rm -f /etc/systemd/system/${SERVICE_NAME}.service
+        systemctl daemon-reload 2>/dev/null || true
+        ;;
+    openrc)
+        rc-update del ${SERVICE_NAME} 2>/dev/null || true
+        rm -f /etc/init.d/${SERVICE_NAME}
+        ;;
+    *)
+        rm -f /usr/local/bin/xray-start /usr/local/bin/xray-stop
+        rm -f ${PID_FILE}
+        ;;
     esac
 
     # 删除文件
@@ -1176,70 +1239,70 @@ main() {
     local cmd="${1:-help}"
 
     case "$cmd" in
-        install)
-            check_root
-            echo ""
-            echo -e "${CYAN}============================================${NC}"
-            echo -e "${GREEN}  Xray VLESS 一键安装${NC}"
-            echo -e "${CYAN}============================================${NC}"
-            echo ""
+    install)
+        check_root
+        echo ""
+        echo -e "${CYAN}============================================${NC}"
+        echo -e "${GREEN}  Xray VLESS 一键安装${NC}"
+        echo -e "${CYAN}============================================${NC}"
+        echo ""
 
-            # 选择部署模式
-            local mode=$(select_mode)
-            local domain=""
+        # 选择部署模式
+        local mode=$(select_mode)
+        local domain=""
 
-            # CDN 模式需要域名
-            if [[ "$mode" == "cdn" ]]; then
-                domain=$(get_domain)
-            fi
+        # CDN 模式需要域名
+        if [[ "$mode" == "cdn" ]]; then
+            domain=$(get_domain)
+        fi
 
-            install_deps
-            enable_bbr
-            enable_icmp
+        install_deps
+        enable_bbr
+        enable_icmp
 
-            # 检查端口
-            check_port 443
+        # 检查端口
+        check_port 443
 
-            install_xray
-            generate_config "$mode" "$domain"
-            configure_firewall
-            install_service
-            show_info
-            ;;
-        bbr)
-            check_root
-            enable_bbr
-            ;;
-        icmp)
-            check_root
-            enable_icmp
-            ;;
-        uninstall)
-            check_root
-            uninstall_xray
-            ;;
-        status)
-            show_status
-            ;;
-        show)
-            show_info
-            ;;
-        restart)
-            check_root
-            restart_service
-            ;;
-        update)
-            check_root
-            update_xray
-            ;;
-        help|--help|-h)
-            show_usage
-            ;;
-        *)
-            log_error "未知命令: $cmd"
-            show_usage
-            exit 1
-            ;;
+        install_xray
+        generate_config "$mode" "$domain"
+        configure_firewall
+        install_service
+        show_info
+        ;;
+    bbr)
+        check_root
+        enable_bbr
+        ;;
+    icmp)
+        check_root
+        enable_icmp
+        ;;
+    uninstall)
+        check_root
+        uninstall_xray
+        ;;
+    status)
+        show_status
+        ;;
+    show)
+        show_info
+        ;;
+    restart)
+        check_root
+        restart_service
+        ;;
+    update)
+        check_root
+        update_xray
+        ;;
+    help | --help | -h)
+        show_usage
+        ;;
+    *)
+        log_error "未知命令: $cmd"
+        show_usage
+        exit 1
+        ;;
     esac
 }
 
