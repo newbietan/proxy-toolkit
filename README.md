@@ -30,6 +30,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/newbietan/proxy-toolkit/main
 ```
 
 安装时会提示选择部署模式，CDN 模式需要提前准备：
+
 1. 拥有一个域名
 2. 域名 NS 已切换到 Cloudflare
 3. 在 Cloudflare 添加 A 记录指向服务器 IP
@@ -186,7 +187,7 @@ proxies:
 ## 文件位置
 
 | 文件 | 路径 |
-|------|------|
+| ------ | ------ |
 | Xray 二进制 | `/usr/local/bin/xray` |
 | 配置文件 | `/usr/local/etc/xray/config.json` |
 | 安装信息 | `/usr/local/etc/xray/install-info.conf` |
@@ -204,7 +205,7 @@ proxies:
 ## 兼容性
 
 | 系统 | 包管理器 | Init 系统 | 状态 | 备注 |
-|------|----------|-----------|------|------|
+| ------ | ---------- | ----------- | ------ | ------ |
 | Ubuntu/Debian | apt | systemd | ✅ 完全支持 | 推荐 |
 | CentOS/RHEL | yum/dnf | systemd | ✅ 完全支持 | |
 | Alpine | apk | OpenRC | ✅ 支持 | 需先安装 bash |
