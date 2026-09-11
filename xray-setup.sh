@@ -14,6 +14,15 @@ GITHUB_LATEST_URL="https://github.com/XTLS/Xray-core/releases/latest"
 INSTALL_INFO="${XRAY_CONFIG_DIR}/install-info.conf"
 PID_FILE="/var/run/xray.pid"
 
+HYSTERIA_DIR="/usr/local/bin"
+HYSTERIA_CONFIG_DIR="/etc/hysteria"
+HYSTERIA_CONFIG="${HYSTERIA_CONFIG_DIR}/config.yaml"
+HYSTERIA_LOG="/var/log/hysteria"
+HYSTERIA_SERVICE_NAME="hysteria-server"
+HYSTERIA_PID_FILE="/var/run/hysteria.pid"
+HYSTERIA_GITHUB_API="https://api.github.com/repos/apernet/hysteria/releases/latest"
+HYSTERIA_LATEST_URL="https://github.com/apernet/hysteria/releases/latest"
+
 # ==================== 颜色 ====================
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -56,6 +65,21 @@ get_arch() {
     s390x) echo "s390x" ;;
     *)
         log_error "不支持的架构: $arch"
+        exit 1
+        ;;
+    esac
+}
+
+# 检测 Hysteria 系统架构
+get_hysteria_arch() {
+    local arch=$(uname -m)
+    case $arch in
+    x86_64 | amd64) echo "amd64" ;;
+    aarch64 | arm64) echo "arm64" ;;
+    armv7l | armhf) echo "arm" ;;
+    s390x) echo "s390x" ;;
+    *)
+        log_error "Hysteria 2 不支持的系统架构: $arch"
         exit 1
         ;;
     esac
@@ -217,41 +241,56 @@ install_firewall() {
 
 # 检测端口占用并处理
 check_port() {
-    local port="${1:-443}"
-    log_info "检查端口 ${port} 占用情况..."
+    local port="${1:-8443}"
+    local proto="${2:-tcp}"
+    log_info "检查端口 ${port}/${proto} 占用情况..."
 
     local pid=""
     local process_name=""
 
-    # 优先使用 lsof/ss/netstat 查找占用进程
-    if command -v lsof &>/dev/null; then
-        pid=$(lsof -ti:${port} 2>/dev/null | grep -v "^1$" | head -1)
-    elif command -v ss &>/dev/null; then
-        local ss_output=$(ss -tlnp 2>/dev/null | grep ":${port} " || true)
-        if [[ -n "$ss_output" ]]; then
-            pid=$(echo "$ss_output" | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | grep -v "^1$" | head -1)
+    if [[ "$proto" == "udp" ]]; then
+        # UDP 检查
+        if command -v lsof &>/dev/null; then
+            pid=$(lsof -tiUDP:${port} 2>/dev/null | grep -v "^1$" | head -1)
+        elif command -v ss &>/dev/null; then
+            local ss_output=$(ss -ulnp 2>/dev/null | grep ":${port} " || true)
+            if [[ -n "$ss_output" ]]; then
+                pid=$(echo "$ss_output" | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | grep -v "^1$" | head -1)
+            fi
+        elif command -v netstat &>/dev/null; then
+            pid=$(netstat -ulnp 2>/dev/null | grep ":${port} " | awk '{print $7}' | cut -d'/' -f1 | grep -v "^1$" | head -1)
         fi
-    elif command -v netstat &>/dev/null; then
-        pid=$(netstat -tlnp 2>/dev/null | grep ":${port} " | awk '{print $7}' | cut -d'/' -f1 | grep -v "^1$" | head -1)
-    fi
-
-    # 兜底: fuser
-    if [[ -z "$pid" ]] && command -v fuser &>/dev/null; then
-        pid=$(fuser ${port}/tcp 2>/dev/null | tr -d ' ' | grep -v "^1$" | head -1)
-    fi
-
-    # 兜底: nc 连接测试（无法获取 PID，仅判断是否占用）
-    if [[ -z "$pid" ]] && command -v nc &>/dev/null; then
-        if nc -z -w1 127.0.0.1 ${port} 2>/dev/null; then
-            log_warn "端口 ${port} 已被占用，但无法获取占用进程信息"
-            log_error "请手动检查端口占用: lsof -i:${port} 或 ss -tlnp | grep :${port}"
-            exit 1
+        if [[ -z "$pid" ]] && command -v fuser &>/dev/null; then
+            pid=$(fuser "${port}/udp" 2>/dev/null | tr -d ' ' | grep -v "^1$" | head -1)
+        fi
+    else
+        # TCP 检查
+        if command -v lsof &>/dev/null; then
+            pid=$(lsof -tiTCP:${port} -sTCP:LISTEN 2>/dev/null | grep -v "^1$" | head -1)
+            [[ -z "$pid" ]] && pid=$(lsof -ti:${port} 2>/dev/null | grep -v "^1$" | head -1)
+        elif command -v ss &>/dev/null; then
+            local ss_output=$(ss -tlnp 2>/dev/null | grep ":${port} " || true)
+            if [[ -n "$ss_output" ]]; then
+                pid=$(echo "$ss_output" | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | grep -v "^1$" | head -1)
+            fi
+        elif command -v netstat &>/dev/null; then
+            pid=$(netstat -tlnp 2>/dev/null | grep ":${port} " | awk '{print $7}' | cut -d'/' -f1 | grep -v "^1$" | head -1)
+        fi
+        if [[ -z "$pid" ]] && command -v fuser &>/dev/null; then
+            pid=$(fuser "${port}/tcp" 2>/dev/null | tr -d ' ' | grep -v "^1$" | head -1)
+        fi
+        if [[ -z "$pid" ]] && command -v nc &>/dev/null; then
+            if nc -z -w1 127.0.0.1 "${port}" 2>/dev/null; then
+                log_warn "端口 ${port} 已被占用，但无法获取占用进程信息"
+                log_error "请手动检查端口占用: lsof -i:${port} 或 ss -tlnp | grep :${port}"
+                exit 1
+            fi
         fi
     fi
 
     if [[ -n "$pid" ]]; then
         process_name=$(ps -p ${pid} -o comm= 2>/dev/null || echo "unknown")
-        log_warn "端口 ${port} 被进程 ${process_name} (PID: ${pid}) 占用"
+        log_warn "端口 ${port}/${proto} 被进程 ${process_name} (PID: ${pid}) 占用"
 
         case "$process_name" in
         nginx | apache2 | httpd | caddy | lighttpd)
@@ -264,25 +303,25 @@ check_port() {
             fi
             log_info "${process_name} 已停止"
             ;;
-        xray)
-            log_info "停止已运行的 Xray..."
+        xray | hysteria)
+            log_info "停止已运行的 ${process_name}..."
             kill ${pid} 2>/dev/null || true
             sleep 1
             ;;
         *)
-            read -p "是否终止进程 ${process_name} (PID: ${pid})? (y/N): " confirm
+            read -r -p "是否终止进程 ${process_name} (PID: ${pid})? (y/N): " confirm
             if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
                 kill ${pid} 2>/dev/null || true
                 sleep 1
                 log_info "进程已终止"
             else
-                log_error "端口 ${port} 被占用，请手动处理或修改配置使用其他端口"
+                log_error "端口 ${port}/${proto} 被占用，请手动处理或修改配置使用其他端口"
                 exit 1
             fi
             ;;
         esac
     else
-        log_info "端口 ${port} 可用"
+        log_info "端口 ${port}/${proto} 可用"
     fi
 }
 
@@ -376,22 +415,130 @@ select_mode() {
     echo -e "${GREEN}  选择部署模式${NC}" >&2
     echo -e "${CYAN}============================================${NC}" >&2
     echo "" >&2
-    echo -e "  ${BLUE}1)${NC} 直连模式 (VLESS + Reality)" >&2
-    echo -e "     - 速度快、延迟低、伪装强" >&2
-    echo -e "     - 需要服务器 IP 稳定" >&2
+    echo -e "  ${BLUE}1)${NC} 直连模式 (VLESS + Reality) - TCP" >&2
+    echo -e "     - 速度快、延迟低、伪装强、无需域名" >&2
+    echo -e "     - 默认监听备用 HTTPS 端口 8443 (可自定义)" >&2
     echo "" >&2
-    echo -e "  ${BLUE}2)${NC} CDN 模式 (VLESS + XHTTP + Cloudflare)" >&2
-    echo -e "     - 隐藏源站 IP、抗封锁" >&2
-    echo -e "     - 速度稍慢、需要域名" >&2
+    echo -e "  ${BLUE}2)${NC} 极速抗封锁模式 (Hysteria 2) - UDP" >&2
+    echo -e "     - 基于魔改 QUIC，暴力抗丢包，弱网加速效果拔群" >&2
+    echo -e "     - 支持端口跳跃 (Port Hopping)，有效突破单一 UDP 端口封锁与限速" >&2
+    echo -e "     - 自动签发伪装证书，无需域名" >&2
     echo "" >&2
-    echo -n "请选择模式 [1/2]: " >&2
-    read mode_choice
+    echo -e "  ${BLUE}3)${NC} CDN 模式 (VLESS + XHTTP + Cloudflare)" >&2
+    echo -e "     - 隐藏源站 IP、抗封锁兜底" >&2
+    echo -e "     - 需自备域名并接入 Cloudflare CDN" >&2
+    echo "" >&2
+    echo -n "请选择模式 [1/2/3, 默认 1]: " >&2
+    read -r mode_choice
 
     case "$mode_choice" in
     1) echo "direct" ;;
-    2) echo "cdn" ;;
+    2) echo "hysteria" ;;
+    3) echo "cdn" ;;
     *) echo "direct" ;;
     esac
+}
+
+# 获取服务器公网 IPv4
+get_server_ip() {
+    local ip=""
+    ip=$(curl -s4 --connect-timeout 5 https://ifconfig.me 2>/dev/null ||
+        curl -s4 --connect-timeout 5 https://api.ipify.org 2>/dev/null ||
+        curl -s4 --connect-timeout 5 https://ipinfo.io/ip 2>/dev/null)
+    if [[ -z "$ip" ]]; then
+        ip="<YOUR_SERVER_IP>"
+        log_warn "无法自动获取服务器 IPv4，请手动替换配置中的 <YOUR_SERVER_IP>" >&2
+    fi
+    echo "$ip"
+}
+
+# 获取 Hysteria 2 配置参数
+get_hysteria_settings() {
+    echo "" >&2
+    echo -e "${CYAN}--------------------------------------------${NC}" >&2
+    echo -e "${GREEN}  Hysteria 2 节点配置${NC}" >&2
+    echo -e "${CYAN}--------------------------------------------${NC}" >&2
+
+    # 1. 端口设置
+    local port=""
+    while true; do
+        echo -n "请输入 Hysteria 2 监听端口 [默认: 8443]: " >&2
+        read -r port
+        port="${port:-8443}"
+        if [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; then
+            break
+        else
+            log_warn "端口无效，请输入 1-65535 之间的数字" >&2
+        fi
+    done
+
+    # 2. 端口跳跃
+    local enable_hop="false"
+    local hop_start=""
+    local hop_end=""
+    echo "" >&2
+    echo -e "${YELLOW}端口跳跃 (Port Hopping) 说明:${NC}" >&2
+    echo -e "  通过将大范围 UDP 端口转发至主端口，客户端可在多个端口间跳跃，" >&2
+    echo -e "  能有效瓦解运营商针对单一 UDP 端口的 QoS 限速与阻断。" >&2
+    echo -n "是否启用端口跳跃? (Y/n) [默认: Y]: " >&2
+    read -r hop_choice
+    hop_choice="${hop_choice:-Y}"
+
+    if [[ "$hop_choice" == "y" || "$hop_choice" == "Y" ]]; then
+        enable_hop="true"
+        while true; do
+            echo -n "请输入端口跳跃范围 [默认: 20000-50000]: " >&2
+            read -r hop_range
+            hop_range="${hop_range:-20000-50000}"
+            if [[ "$hop_range" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+                hop_start="${BASH_REMATCH[1]}"
+                hop_end="${BASH_REMATCH[2]}"
+                if [ "$hop_start" -ge 1 ] && [ "$hop_end" -le 65535 ] && [ "$hop_start" -lt "$hop_end" ]; then
+                    break
+                fi
+            fi
+            log_warn "端口范围格式有误，格式应为 起始端口-结束端口 (如 20000-50000)" >&2
+        done
+    fi
+
+    # 3. 密码设置
+    echo "" >&2
+    echo -n "请输入认证密码 [直接回车随机生成]: " >&2
+    read -r password
+    if [[ -z "$password" ]]; then
+        password=$(openssl rand -base64 16 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 16)
+        [[ -z "$password" ]] && password=$(generate_uuid | tr -d '-')
+        log_info "已生成随机密码: ${password}" >&2
+    fi
+
+    # 4. SNI 伪装域名
+    echo "" >&2
+    echo -n "请输入伪装 SNI 域名 [默认: www.bing.com]: " >&2
+    read -r sni
+    sni="${sni:-www.bing.com}"
+
+    echo "${port}|${enable_hop}|${hop_start}|${hop_end}|${password}|${sni}"
+}
+
+# 获取 Reality 端口（直连模式用）
+get_reality_port() {
+    local port=""
+    while true; do
+        echo "" >&2
+        echo -e "${CYAN}--------------------------------------------${NC}" >&2
+        echo -e "${GREEN}  Reality 端口设置${NC}" >&2
+        echo -e "${CYAN}--------------------------------------------${NC}" >&2
+        echo -e "提示: 443 端口在部分地区受到审查或阻断，推荐使用备用 HTTPS 端口 8443 或高位端口。" >&2
+        echo -n "请输入 Reality 监听端口 [默认: 8443]: " >&2
+        read -r port
+        port="${port:-8443}"
+        if [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; then
+            echo "$port"
+            return 0
+        else
+            log_warn "端口无效，请输入 1-65535 之间的数字" >&2
+        fi
+    done
 }
 
 # 获取域名（CDN 模式用）
@@ -419,7 +566,24 @@ get_domain() {
 
 # ==================== 服务管理 ====================
 
-# 安装 systemd 服务
+# 解析当前安装的服务类型与变量
+resolve_service_vars() {
+    if [[ -f "${INSTALL_INFO}" ]]; then
+        # shellcheck disable=SC1090
+        source "${INSTALL_INFO}"
+    fi
+    if [[ "${CORE_TYPE:-}" == "hysteria" || "${DEPLOY_MODE:-}" == "hysteria" ]]; then
+        SERVICE_NAME="${HYSTERIA_SERVICE_NAME}"
+        PID_FILE="${HYSTERIA_PID_FILE}"
+        CORE_TYPE="hysteria"
+    else
+        SERVICE_NAME="xray"
+        PID_FILE="/var/run/xray.pid"
+        CORE_TYPE="xray"
+    fi
+}
+
+# 安装 Xray systemd 服务
 install_systemd_service() {
     log_info "安装 systemd 服务..."
 
@@ -445,6 +609,35 @@ EOF
     systemctl start ${SERVICE_NAME}
 
     log_info "systemd 服务启动完成"
+}
+
+# 安装 Hysteria systemd 服务
+install_hysteria_systemd_service() {
+    log_info "安装 Hysteria systemd 服务..."
+
+    cat >/etc/systemd/system/${HYSTERIA_SERVICE_NAME}.service <<EOF
+[Unit]
+Description=Hysteria 2 Server Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=${HYSTERIA_CONFIG_DIR}
+ExecStart=${HYSTERIA_DIR}/hysteria server -c ${HYSTERIA_CONFIG}
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable ${HYSTERIA_SERVICE_NAME} >/dev/null 2>&1
+    systemctl start ${HYSTERIA_SERVICE_NAME}
+
+    log_info "Hysteria systemd 服务启动完成"
 }
 
 # 安装 OpenRC 服务
@@ -483,6 +676,44 @@ SCRIPT
     rc-service ${SERVICE_NAME} start
 
     log_info "OpenRC 服务启动完成"
+}
+
+# 安装 Hysteria OpenRC 服务
+install_hysteria_openrc_service() {
+    log_info "安装 Hysteria OpenRC 服务..."
+    mkdir -p /run
+    mkdir -p "${HYSTERIA_LOG}"
+
+    cat >/etc/init.d/${HYSTERIA_SERVICE_NAME} <<EOF
+#!/sbin/openrc-run
+
+name="hysteria"
+command="${HYSTERIA_DIR}/hysteria"
+command_args="server -c ${HYSTERIA_CONFIG}"
+command_background=true
+pidfile="${HYSTERIA_PID_FILE}"
+start_stop_daemon_args="--background --make-pidfile"
+output_log="${HYSTERIA_LOG}/access.log"
+error_log="${HYSTERIA_LOG}/error.log"
+
+depend() {
+    need net
+    after firewall
+}
+
+start_pre() {
+    if [ ! -d /run ]; then
+        mkdir -p /run
+    fi
+    return 0
+}
+EOF
+
+    chmod +x /etc/init.d/${HYSTERIA_SERVICE_NAME}
+    rc-update add ${HYSTERIA_SERVICE_NAME} default 2>/dev/null || true
+    rc-service ${HYSTERIA_SERVICE_NAME} start
+
+    log_info "Hysteria OpenRC 服务启动完成"
 }
 
 # 使用 nohup 启动（兼容方案）
@@ -538,6 +769,45 @@ EOF
     fi
 }
 
+# 安装 Hysteria nohup 服务
+install_hysteria_nohup_service() {
+    log_info "配置 Hysteria nohup 运行模式..."
+    mkdir -p "${HYSTERIA_LOG}"
+
+    cat >/usr/local/bin/hysteria-start <<EOF
+#!/bin/bash
+if [[ -f ${HYSTERIA_PID_FILE} ]] && kill -0 \$(cat ${HYSTERIA_PID_FILE}) 2>/dev/null; then
+    echo "Hysteria is already running"
+    exit 0
+fi
+mkdir -p ${HYSTERIA_LOG}
+nohup ${HYSTERIA_DIR}/hysteria server -c ${HYSTERIA_CONFIG} >${HYSTERIA_LOG}/hysteria.log 2>&1 &
+echo \$! >${HYSTERIA_PID_FILE}
+echo "Hysteria started with PID \$(cat ${HYSTERIA_PID_FILE})"
+EOF
+
+    cat >/usr/local/bin/hysteria-stop <<EOF
+#!/bin/bash
+if [[ -f ${HYSTERIA_PID_FILE} ]]; then
+    kill \$(cat ${HYSTERIA_PID_FILE}) 2>/dev/null
+    rm -f ${HYSTERIA_PID_FILE}
+    echo "Hysteria stopped"
+else
+    echo "Hysteria is not running"
+fi
+EOF
+
+    chmod +x /usr/local/bin/hysteria-start /usr/local/bin/hysteria-stop
+
+    if [[ -f /etc/rc.local ]]; then
+        if ! grep -q "hysteria-start" /etc/rc.local; then
+            sed -i '/^exit 0/i \/usr/local/bin/hysteria-start' /etc/rc.local
+        fi
+    fi
+
+    /usr/local/bin/hysteria-start
+}
+
 # 安装服务（自动选择）
 install_service() {
     local init_system=$(get_init_system)
@@ -556,8 +826,27 @@ install_service() {
     esac
 }
 
+# 安装 Hysteria 服务（自动选择）
+install_hysteria_service() {
+    local init_system=$(get_init_system)
+    log_info "检测到 init 系统: ${init_system}"
+
+    case ${init_system} in
+    systemd)
+        install_hysteria_systemd_service
+        ;;
+    openrc)
+        install_hysteria_openrc_service
+        ;;
+    *)
+        install_hysteria_nohup_service
+        ;;
+    esac
+}
+
 # 停止服务
 stop_service() {
+    resolve_service_vars
     local init_system=$(get_init_system)
 
     case ${init_system} in
@@ -572,8 +861,9 @@ stop_service() {
             kill $(cat ${PID_FILE}) 2>/dev/null || true
             rm -f ${PID_FILE}
         fi
-        # 兜底: 清理可能残留的 xray 进程
-        local residual_pid=$(pgrep -x xray 2>/dev/null | head -1)
+        local proc_name="xray"
+        [[ "${CORE_TYPE}" == "hysteria" ]] && proc_name="hysteria"
+        local residual_pid=$(pgrep -x "${proc_name}" 2>/dev/null | head -1)
         if [[ -n "$residual_pid" ]]; then
             kill ${residual_pid} 2>/dev/null || true
         fi
@@ -583,6 +873,7 @@ stop_service() {
 
 # 启动服务
 start_service() {
+    resolve_service_vars
     local init_system=$(get_init_system)
 
     case ${init_system} in
@@ -593,14 +884,22 @@ start_service() {
         rc-service ${SERVICE_NAME} start 2>/dev/null || true
         ;;
     *)
-        nohup ${XRAY_DIR}/xray run -config ${XRAY_CONFIG} >${XRAY_LOG}/xray.log 2>&1 &
-        echo $! >${PID_FILE}
+        if [[ "${CORE_TYPE}" == "hysteria" ]]; then
+            mkdir -p "${HYSTERIA_LOG}"
+            nohup ${HYSTERIA_DIR}/hysteria server -c ${HYSTERIA_CONFIG} >${HYSTERIA_LOG}/hysteria.log 2>&1 &
+            echo $! >${PID_FILE}
+        else
+            mkdir -p "${XRAY_LOG}"
+            nohup ${XRAY_DIR}/xray run -config ${XRAY_CONFIG} >${XRAY_LOG}/xray.log 2>&1 &
+            echo $! >${PID_FILE}
+        fi
         ;;
     esac
 }
 
 # 检查服务状态
 is_running() {
+    resolve_service_vars
     local init_system=$(get_init_system)
 
     case ${init_system} in
@@ -691,30 +990,36 @@ EOF
 
 # 配置防火墙
 configure_firewall() {
-    log_info "配置防火墙..."
+    local port="${1:-8443}"
+    local proto="${2:-tcp}"
+    log_info "配置防火墙，放行 SSH (22/tcp) 和服务端口 (${port}/${proto})..."
+
+    # 规范化端口表示：firewalld 端口范围使用 '-'，ufw/iptables 使用 ':'
+    local port_dash="${port/:/-}"
+    local port_colon="${port/-/:}"
 
     # 检测防火墙类型
     if command -v ufw &>/dev/null; then
         # Ubuntu/Debian ufw
         log_info "检测到 ufw 防火墙"
         ufw allow 22/tcp >/dev/null 2>&1 || true
-        ufw allow 443/tcp >/dev/null 2>&1 || true
+        ufw allow ${port_colon}/${proto} >/dev/null 2>&1 || true
         ufw reload >/dev/null 2>&1 || true
-        log_info "ufw 已放行 22 和 443 端口"
+        log_info "ufw 已放行 22/tcp 和 ${port_colon}/${proto} 端口"
     elif command -v firewall-cmd &>/dev/null; then
         # CentOS/RHEL firewalld
         log_info "检测到 firewalld 防火墙"
         firewall-cmd --permanent --add-port=22/tcp >/dev/null 2>&1 || true
-        firewall-cmd --permanent --add-port=443/tcp >/dev/null 2>&1 || true
+        firewall-cmd --permanent --add-port=${port_dash}/${proto} >/dev/null 2>&1 || true
         firewall-cmd --reload >/dev/null 2>&1 || true
-        log_info "firewalld 已放行 22 和 443 端口"
+        log_info "firewalld 已放行 22/tcp 和 ${port_dash}/${proto} 端口"
     elif command -v iptables &>/dev/null; then
         # 通用 iptables
         log_info "检测到 iptables 防火墙"
         iptables -C INPUT -p tcp --dport 22 -j ACCEPT 2>/dev/null ||
             iptables -I INPUT -p tcp --dport 22 -j ACCEPT
-        iptables -C INPUT -p tcp --dport 443 -j ACCEPT 2>/dev/null ||
-            iptables -I INPUT -p tcp --dport 443 -j ACCEPT
+        iptables -C INPUT -p ${proto} --dport ${port_colon} -j ACCEPT 2>/dev/null ||
+            iptables -I INPUT -p ${proto} --dport ${port_colon} -j ACCEPT
         # 持久化
         if command -v iptables-save &>/dev/null; then
             iptables-save >/etc/iptables.rules 2>/dev/null || true
@@ -727,13 +1032,55 @@ iptables-restore < /etc/iptables.rules 2>/dev/null
 RESTORE
             chmod +x /etc/network/if-pre-up.d/iptables-restore 2>/dev/null || true
         fi
-        log_info "iptables 已放行 22 和 443 端口"
+        log_info "iptables 已放行 22/tcp 和 ${port_colon}/${proto} 端口"
     else
         log_error "未检测到任何防火墙工具 (ufw/firewalld/iptables)，请手动安装后重试"
         exit 1
     fi
 
     return 0
+}
+
+# 配置端口跳跃 (Port Hopping) iptables 重定向
+configure_port_hopping() {
+    local target_port="$1"
+    local hop_start="$2"
+    local hop_end="$3"
+
+    log_info "配置 iptables UDP 端口跳跃转发: ${hop_start}:${hop_end} -> ${target_port}..."
+    if command -v iptables &>/dev/null; then
+        iptables -t nat -C PREROUTING -p udp --dport "${hop_start}:${hop_end}" -j REDIRECT --to-ports "${target_port}" 2>/dev/null ||
+            iptables -t nat -A PREROUTING -p udp --dport "${hop_start}:${hop_end}" -j REDIRECT --to-ports "${target_port}"
+
+        if command -v iptables-save &>/dev/null; then
+            iptables-save >/etc/iptables.rules 2>/dev/null || true
+        fi
+        if command -v netfilter-persistent &>/dev/null; then
+            netfilter-persistent save >/dev/null 2>&1 || true
+        fi
+        log_info "iptables 端口跳跃规则配置完成"
+    else
+        log_warn "未检测到 iptables，端口跳跃重定向可能需要手动配置"
+    fi
+}
+
+# 清理端口跳跃规则
+cleanup_port_hopping() {
+    local target_port="$1"
+    local hop_start="$2"
+    local hop_end="$3"
+
+    if [[ -n "$target_port" && -n "$hop_start" && -n "$hop_end" ]] && command -v iptables &>/dev/null; then
+        log_info "清理 iptables 端口跳跃规则: ${hop_start}:${hop_end} -> ${target_port}..."
+        iptables -t nat -D PREROUTING -p udp --dport "${hop_start}:${hop_end}" -j REDIRECT --to-ports "${target_port}" 2>/dev/null || true
+
+        if command -v iptables-save &>/dev/null; then
+            iptables-save >/etc/iptables.rules 2>/dev/null || true
+        fi
+        if command -v netfilter-persistent &>/dev/null; then
+            netfilter-persistent save >/dev/null 2>&1 || true
+        fi
+    fi
 }
 
 # ==================== 核心功能 ====================
@@ -798,10 +1145,94 @@ install_xray() {
     echo "$latest_ver" >"${XRAY_CONFIG_DIR}/version.txt" 2>/dev/null || true
 }
 
+# 获取 Hysteria 2 最新版本号
+get_latest_hysteria_version() {
+    local latest_ver=""
+
+    # 方法1: 从 GitHub 重定向获取版本号
+    latest_ver=$(curl -sI -o /dev/null -w '%{redirect_url}' "${HYSTERIA_LATEST_URL}" 2>/dev/null | grep -oE '(app/)?v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+
+    # 方法2: 如果重定向失败，尝试 API
+    if [[ -z "$latest_ver" ]]; then
+        local api_response=$(curl -s "${HYSTERIA_GITHUB_API}" 2>/dev/null)
+        if command -v jq &>/dev/null; then
+            latest_ver=$(echo "$api_response" | jq -r '.tag_name // empty' 2>/dev/null)
+        fi
+        if [[ -z "$latest_ver" ]]; then
+            latest_ver=$(echo "$api_response" | grep -o '"tag_name":"[^"]*"' | head -1 | cut -d'"' -f4)
+        fi
+    fi
+
+    # 方法3: 默认版本兜底
+    if [[ -z "$latest_ver" ]]; then
+        latest_ver="app/v2.12.2"
+    fi
+
+    echo "$latest_ver"
+}
+
+# 安装 Hysteria 2
+install_hysteria() {
+    log_info "检测系统架构..."
+    local arch=$(get_hysteria_arch)
+    log_info "Hysteria 架构: ${arch}"
+
+    log_info "获取最新版本信息..."
+    local latest_ver=$(get_latest_hysteria_version)
+    log_info "最新版本: ${latest_ver}"
+
+    # 下载 (优先使用 latest 下载链接，若失败则尝试 tag 链接)
+    local download_url="https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-${arch}"
+    log_info "下载 Hysteria 2: ${download_url}"
+
+    local tmp_file=$(mktemp)
+    if ! curl -fsSL -L -o "${tmp_file}" "${download_url}"; then
+        download_url="https://github.com/apernet/hysteria/releases/download/${latest_ver}/hysteria-linux-${arch}"
+        log_warn "从 latest 下载失败，尝试从 tag 下载: ${download_url}"
+        if ! curl -fsSL -L -o "${tmp_file}" "${download_url}"; then
+            log_error "Hysteria 2 下载失败，请检查网络连接或使用代理"
+            rm -f "${tmp_file}"
+            exit 1
+        fi
+    fi
+
+    mkdir -p "${HYSTERIA_DIR}"
+    mv -f "${tmp_file}" "${HYSTERIA_DIR}/hysteria"
+    chmod +x "${HYSTERIA_DIR}/hysteria"
+
+    log_info "Hysteria 2 安装完成: $("${HYSTERIA_DIR}/hysteria" version 2>/dev/null | head -1)"
+}
+
+# 更新 Hysteria 2
+update_hysteria() {
+    if [[ ! -f ${HYSTERIA_DIR}/hysteria ]]; then
+        log_error "Hysteria 2 未安装"
+        exit 1
+    fi
+
+    local current_ver=$(${HYSTERIA_DIR}/hysteria version 2>/dev/null | head -1 | awk '{print $NF}')
+    local latest_ver=$(get_latest_hysteria_version)
+
+    log_info "当前版本: ${current_ver}"
+    log_info "最新版本: ${latest_ver}"
+
+    if [[ -n "$current_ver" && "$current_ver" == "$latest_ver" ]]; then
+        log_info "已是最新版本"
+        return
+    fi
+
+    log_info "更新中..."
+    stop_service
+    install_hysteria
+    start_service
+    log_info "更新完成"
+}
+
 # 生成配置
 generate_config() {
     local mode="${1:-direct}"
     local domain="${2:-}"
+    local port="${3:-8443}"
 
     log_info "生成配置..."
 
@@ -822,33 +1253,8 @@ generate_config() {
     local short_id=$(generate_short_id)
 
     # 获取服务器 IPv4
-    local server_ip=$(curl -s4 --connect-timeout 5 https://ifconfig.me 2>/dev/null ||
-        curl -s4 --connect-timeout 5 https://api.ipify.org 2>/dev/null ||
-        curl -s4 --connect-timeout 5 https://ipinfo.io/ip 2>/dev/null)
-    if [[ -z "$server_ip" ]]; then
-        server_ip="<YOUR_SERVER_IP>"
-        log_warn "无法自动获取服务器 IPv4，请手动替换配置中的 <YOUR_SERVER_IP>"
-    fi
-
-    # 获取服务器 IPv6（检测网卡绑定的公网地址）
-    local server_ipv6=""
-    local detected_ipv6=$(ip -6 addr show scope global 2>/dev/null | sed -n 's/.*inet6 \([0-9a-fA-F:][0-9a-fA-F:]*\).*/\1/p' | grep -Evi '^(fd|fe80|::1)' | head -1)
-    if [[ -n "$detected_ipv6" ]]; then
-        server_ipv6="$detected_ipv6"
-        log_info "检测到公网 IPv6: ${server_ipv6}"
-    else
-        echo "" >&2
-        echo -e "${YELLOW}未检测到公网 IPv6（可能为 NAT 型服务器）${NC}" >&2
-        echo -e "${YELLOW}如有公网 IPv6 可手动输入以启用 IPv6 直连，直接回车跳过：${NC}" >&2
-        echo -n "公网 IPv6: " >&2
-        read manual_ipv6
-        if [[ -n "$manual_ipv6" ]]; then
-            server_ipv6="$manual_ipv6"
-            log_info "使用手动输入的 IPv6: ${server_ipv6}"
-        else
-            log_info "跳过 IPv6，仅启用 IPv4 直连"
-        fi
-    fi
+    local server_ip
+    server_ip=$(get_server_ip)
 
     # 根据模式生成配置（内置 JSON 生成，不依赖 jq，兼容 Alpine）
     local inbound_json=""
@@ -858,8 +1264,8 @@ generate_config() {
         inbound_json=$(
             cat <<EOF
 {
-  "listen": "::",
-  "port": 443,
+  "listen": "0.0.0.0",
+  "port": ${port},
   "protocol": "vless",
   "settings": {
     "clients": [{"id": "$(json_escape "$uuid")", "flow": "xtls-rprx-vision"}],
@@ -977,12 +1383,13 @@ EOF
     # 保存安装信息
     cat >"${INSTALL_INFO}" <<EOF
 DEPLOY_MODE=${mode}
+CORE_TYPE=xray
+PORT=${port}
 UUID=${uuid}
 PRIVATE_KEY=${private_key}
 PUBLIC_KEY=${public_key}
 SHORT_ID=${short_id}
 SERVER_IP=${server_ip}
-SERVER_IPV6=${server_ipv6}
 SNI=www.cloudflare.com
 INSTALL_DATE="$(date '+%Y-%m-%d %H:%M:%S')"
 EOF
@@ -999,10 +1406,96 @@ EOF
     log_info "配置生成完成"
 }
 
-# 卸载
-uninstall_xray() {
-    log_warn "即将卸载 Xray-core..."
-    read -p "确认卸载? (y/N): " confirm
+# 生成 Hysteria 2 自签名证书
+generate_hysteria_cert() {
+    local sni="${1:-www.bing.com}"
+    mkdir -p "${HYSTERIA_CONFIG_DIR}"
+    log_info "生成 EC (prime256v1) 自签名证书 (SNI: ${sni})..."
+    openssl ecparam -genkey -name prime256v1 -out "${HYSTERIA_CONFIG_DIR}/server.key" 2>/dev/null
+    openssl req -new -x509 -days 3650 \
+        -key "${HYSTERIA_CONFIG_DIR}/server.key" \
+        -out "${HYSTERIA_CONFIG_DIR}/server.crt" \
+        -subj "/CN=${sni}" 2>/dev/null
+    chmod 600 "${HYSTERIA_CONFIG_DIR}/server.key"
+    chmod 644 "${HYSTERIA_CONFIG_DIR}/server.crt"
+    log_info "Hysteria 2 自签名证书生成完成"
+}
+
+# 生成 Hysteria 2 配置
+generate_hysteria_config() {
+    local port="$1"
+    local password="$2"
+    local sni="$3"
+
+    log_info "生成 Hysteria 2 配置..."
+    mkdir -p "${HYSTERIA_CONFIG_DIR}"
+    mkdir -p "${HYSTERIA_LOG}"
+
+    # 备份已有配置
+    if [[ -f "${HYSTERIA_CONFIG}" ]]; then
+        cp "${HYSTERIA_CONFIG}" "${HYSTERIA_CONFIG}.bak"
+        log_info "已备份旧配置到 ${HYSTERIA_CONFIG}.bak"
+    fi
+
+    cat >"${HYSTERIA_CONFIG}" <<EOF
+listen: :${port}
+
+tls:
+  cert: ${HYSTERIA_CONFIG_DIR}/server.crt
+  key: ${HYSTERIA_CONFIG_DIR}/server.key
+
+auth:
+  type: password
+  password: "${password}"
+
+masquerade:
+  type: proxy
+  proxy:
+    url: https://${sni}/
+    rewriteHost: true
+
+quic:
+  initStreamReceiveWindow: 8388608
+  maxStreamReceiveWindow: 8388608
+  initConnReceiveWindow: 20971520
+  maxConnReceiveWindow: 20971520
+EOF
+    chmod 600 "${HYSTERIA_CONFIG}"
+    log_info "Hysteria 2 配置生成完成"
+}
+
+# 保存 Hysteria 2 安装信息
+save_hysteria_info() {
+    local port="$1"
+    local enable_hop="$2"
+    local hop_start="$3"
+    local hop_end="$4"
+    local password="$5"
+    local sni="$6"
+    local server_ip="$7"
+
+    mkdir -p "${XRAY_CONFIG_DIR}"
+    cat >"${INSTALL_INFO}" <<EOF
+DEPLOY_MODE=hysteria
+CORE_TYPE=hysteria
+PORT=${port}
+HOPPING_ENABLED=${enable_hop}
+HOP_START=${hop_start}
+HOP_END=${hop_end}
+PASSWORD=${password}
+SNI=${sni}
+SERVER_IP=${server_ip}
+INSTALL_DATE="$(date '+%Y-%m-%d %H:%M:%S')"
+EOF
+    log_info "Hysteria 2 安装信息已保存"
+}
+
+# 卸载节点服务
+uninstall_node() {
+    resolve_service_vars
+    log_warn "即将卸载当前节点服务 (${CORE_TYPE:-xray})..."
+    local confirm=""
+    read -r -p "确认卸载? (y/N): " confirm
     if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
         log_info "取消卸载"
         return
@@ -1012,28 +1505,54 @@ uninstall_xray() {
     stop_service
 
     # 删除服务文件
-    local init_system=$(get_init_system)
+    local init_system
+    init_system=$(get_init_system)
     case ${init_system} in
     systemd)
-        rm -f /etc/systemd/system/${SERVICE_NAME}.service
+        rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
         systemctl daemon-reload 2>/dev/null || true
         ;;
     openrc)
-        rc-update del ${SERVICE_NAME} 2>/dev/null || true
-        rm -f /etc/init.d/${SERVICE_NAME}
+        rc-update del "${SERVICE_NAME}" 2>/dev/null || true
+        rm -f "/etc/init.d/${SERVICE_NAME}"
         ;;
     *)
-        rm -f /usr/local/bin/xray-start /usr/local/bin/xray-stop
-        rm -f ${PID_FILE}
+        rm -f "/usr/local/bin/${CORE_TYPE}-start" "/usr/local/bin/${CORE_TYPE}-stop"
+        rm -f "${PID_FILE}"
         ;;
     esac
 
     # 删除文件
-    rm -f ${XRAY_DIR}/xray
-    rm -rf ${XRAY_CONFIG_DIR}
-    rm -rf ${XRAY_LOG}
+    if [[ "${CORE_TYPE}" == "hysteria" ]]; then
+        if [[ "${HOPPING_ENABLED:-false}" == "true" && -n "${PORT:-}" && -n "${HOP_START:-}" && -n "${HOP_END:-}" ]]; then
+            cleanup_port_hopping "${PORT}" "${HOP_START}" "${HOP_END}"
+        fi
+        rm -f "${HYSTERIA_DIR}/hysteria"
+        rm -rf "${HYSTERIA_CONFIG_DIR}"
+        rm -rf "${HYSTERIA_LOG}"
+    else
+        rm -f "${XRAY_DIR}/xray"
+        rm -rf "${XRAY_CONFIG_DIR}"
+        rm -rf "${XRAY_LOG}"
+    fi
 
+    rm -f "${INSTALL_INFO}"
     log_info "卸载完成"
+}
+
+# 兼容旧函数名
+uninstall_xray() {
+    uninstall_node
+}
+
+# 更新节点
+update_node() {
+    resolve_service_vars
+    if [[ "${CORE_TYPE}" == "hysteria" ]]; then
+        update_hysteria
+    else
+        update_xray
+    fi
 }
 
 # 更新
@@ -1063,10 +1582,16 @@ update_xray() {
 
 # 查看状态
 show_status() {
+    resolve_service_vars
     echo ""
-    echo -e "${CYAN}========== Xray 服务状态 ==========${NC}"
+    if [[ "${CORE_TYPE}" == "hysteria" ]]; then
+        echo -e "${CYAN}========== Hysteria 2 服务状态 ==========${NC}"
+    else
+        echo -e "${CYAN}========== Xray 服务状态 ==========${NC}"
+    fi
 
-    local init_system=$(get_init_system)
+    local init_system
+    init_system=$(get_init_system)
     log_info "Init 系统: ${init_system}"
 
     if is_running; then
@@ -1075,8 +1600,14 @@ show_status() {
         echo -e "  状态: ${RED}未运行${NC}"
     fi
 
-    if [[ -f "${XRAY_CONFIG_DIR}/version.txt" ]]; then
-        echo -e "  版本: $(cat ${XRAY_CONFIG_DIR}/version.txt)"
+    if [[ "${CORE_TYPE}" == "hysteria" ]]; then
+        if [[ -x "${HYSTERIA_DIR}/hysteria" ]]; then
+            echo -e "  版本: $(${HYSTERIA_DIR}/hysteria version 2>/dev/null | head -1)"
+        fi
+    else
+        if [[ -f "${XRAY_CONFIG_DIR}/version.txt" ]]; then
+            echo -e "  版本: $(cat "${XRAY_CONFIG_DIR}/version.txt")"
+        fi
     fi
 
     if [[ -f "${INSTALL_INFO}" ]]; then
@@ -1099,53 +1630,81 @@ show_info() {
 
     echo ""
     echo -e "${CYAN}============================================${NC}"
-    echo -e "${GREEN}  Xray VLESS 节点信息${NC}"
+    if [[ "$mode" == "hysteria" ]]; then
+        echo -e "${GREEN}  Hysteria 2 节点信息${NC}"
+    else
+        echo -e "${GREEN}  Xray VLESS 节点信息${NC}"
+    fi
     echo -e "${CYAN}============================================${NC}"
 
     # 直连模式信息
     if [[ "$mode" == "direct" ]]; then
-        local reality_link="vless://${UUID}@${SERVER_IP}:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#Xray-Reality"
+        local port="${PORT:-${SERVER_PORT:-8443}}"
+        local reality_link="vless://${UUID}@${SERVER_IP}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#Xray-Reality"
 
         echo ""
-        echo -e "${GREEN}[直连模式 - VLESS + Reality]${NC}"
+        echo -e "${GREEN}[直连模式 - VLESS + Reality (TCP)]${NC}"
         echo ""
         echo -e "  ${BLUE}地址:${NC}   ${SERVER_IP}"
-        echo -e "  ${BLUE}端口:${NC}   443"
+        echo -e "  ${BLUE}端口:${NC}   ${port}"
         echo -e "  ${BLUE}UUID:${NC}   ${UUID}"
         echo -e "  ${BLUE}密钥:${NC}   ${PUBLIC_KEY}"
         echo -e "  ${BLUE}SNI:${NC}    ${SNI}"
         echo -e "  ${BLUE}Flow:${NC}   xtls-rprx-vision"
         echo -e "  ${BLUE}SID:${NC}    ${SHORT_ID}"
-        echo -e "  ${BLUE}双栈:${NC}   已启用 (IPv4 + IPv6)"
         echo ""
         echo -e "${CYAN}--------------------------------------------${NC}"
-        echo -e "${GREEN}IPv4 分享链接:${NC}"
+        echo -e "${GREEN}分享链接:${NC}"
         echo ""
         echo -e "${reality_link}"
         echo ""
 
-        # IPv6 分享链接
-        if [[ -n "${SERVER_IPV6}" ]]; then
-            local reality_link_v6="vless://${UUID}@[${SERVER_IPV6}]:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#Xray-Reality-IPv6"
+        # 生成二维码（如果 qrencode 可用）
+        if command -v qrencode &>/dev/null; then
             echo -e "${CYAN}--------------------------------------------${NC}"
-            echo -e "${GREEN}IPv6 分享链接:${NC}"
+            echo -e "${GREEN}二维码:${NC}"
             echo ""
-            echo -e "${reality_link_v6}"
-            echo ""
+            qrencode -t ANSIUTF8 "${reality_link}"
         fi
+    fi
+
+    # 极速抗封锁模式 (Hysteria 2)
+    if [[ "$mode" == "hysteria" ]]; then
+        local port="${PORT:-8443}"
+        local sni="${SNI:-www.bing.com}"
+        local mport_param=""
+        local hop_desc="未启用"
+
+        if [[ "${HOPPING_ENABLED:-false}" == "true" && -n "${HOP_START:-}" && -n "${HOP_END:-}" ]]; then
+            mport_param="&mport=${HOP_START}-${HOP_END}"
+            hop_desc="${HOP_START}-${HOP_END}"
+        fi
+
+        local hy2_link="hysteria2://${PASSWORD}@${SERVER_IP}:${port}/?insecure=1&sni=${sni}${mport_param}#Hysteria2"
+
+        echo ""
+        echo -e "${GREEN}[极速抗封锁模式 - Hysteria 2 (UDP)]${NC}"
+        echo ""
+        echo -e "  ${BLUE}地址:${NC}       ${SERVER_IP}"
+        echo -e "  ${BLUE}主端口:${NC}     ${port} (UDP)"
+        echo -e "  ${BLUE}端口跳跃:${NC}   ${hop_desc}"
+        echo -e "  ${BLUE}认证密码:${NC}   ${PASSWORD}"
+        echo -e "  ${BLUE}伪装 SNI:${NC}   ${sni}"
+        echo -e "  ${BLUE}传输协议:${NC}   UDP / QUIC"
+        echo -e "  ${BLUE}证书校验:${NC}   允许不安全 (Insecure / Skip-cert-verify: true)"
+        echo ""
+        echo -e "${CYAN}--------------------------------------------${NC}"
+        echo -e "${GREEN}分享链接:${NC}"
+        echo ""
+        echo -e "${hy2_link}"
+        echo ""
 
         # 生成二维码（如果 qrencode 可用）
         if command -v qrencode &>/dev/null; then
             echo -e "${CYAN}--------------------------------------------${NC}"
-            echo -e "${GREEN}IPv4 二维码:${NC}"
+            echo -e "${GREEN}二维码:${NC}"
             echo ""
-            qrencode -t ANSIUTF8 "${reality_link}"
-            if [[ -n "${SERVER_IPV6}" ]]; then
-                echo ""
-                echo -e "${GREEN}IPv6 二维码:${NC}"
-                echo ""
-                qrencode -t ANSIUTF8 "${reality_link_v6}"
-            fi
+            qrencode -t ANSIUTF8 "${hy2_link}"
         fi
     fi
 
@@ -1169,14 +1728,8 @@ show_info() {
         echo ""
         echo -e "${YELLOW}Cloudflare 配置:${NC}"
         echo -e "  1. 添加 A 记录指向 ${SERVER_IP}"
-        if [[ -n "${SERVER_IPV6}" ]]; then
-            echo -e "  2. 添加 AAAA 记录指向 ${SERVER_IPV6}"
-            echo -e "  3. 开启橙色云朵（代理）"
-            echo -e "  4. SSL/TLS 设置为 Full（不选 Strict）"
-        else
-            echo -e "  2. 开启橙色云朵（代理）"
-            echo -e "  3. SSL/TLS 设置为 Full（不选 Strict）"
-        fi
+        echo -e "  2. 开启橙色云朵（代理）"
+        echo -e "  3. SSL/TLS 设置为 Full（不选 Strict）"
         echo ""
         echo -e "${CYAN}--------------------------------------------${NC}"
         echo -e "${GREEN}CDN 分享链接:${NC}"
@@ -1204,7 +1757,8 @@ show_info() {
 
 # 重启服务
 restart_service() {
-    log_info "重启 Xray 服务..."
+    resolve_service_vars
+    log_info "重启 ${SERVICE_NAME} 服务..."
     stop_service
     sleep 1
     start_service
@@ -1215,20 +1769,21 @@ restart_service() {
 
 show_usage() {
     echo ""
-    echo -e "${CYAN}xray-setup${NC} - 极简 VLESS 一键部署"
+    echo -e "${CYAN}proxy-toolkit / xray-setup${NC} - 极简代理一键部署脚本"
     echo ""
     echo "用法: $0 <命令>"
     echo ""
     echo "命令:"
-    echo "  install     安装 Xray-core 并生成配置"
-    echo "              支持两种模式："
-    echo "                1. 直连模式 (VLESS + Reality)"
-    echo "                2. CDN 模式 (VLESS + XHTTP + Cloudflare)"
-    echo "  uninstall   卸载 Xray-core"
+    echo "  install     安装节点服务并生成配置"
+    echo "              支持三种模式："
+    echo "                1. 直连模式 (VLESS + Reality) - TCP 极简伪装"
+    echo "                2. 极速模式 (Hysteria 2) - UDP 弱网加速/端口跳跃"
+    echo "                3. CDN 模式 (VLESS + XHTTP + Cloudflare) - 隐藏 IP 防封"
+    echo "  uninstall   卸载当前节点服务"
     echo "  status      查看服务状态"
     echo "  show        显示节点信息和分享链接"
     echo "  restart     重启服务"
-    echo "  update      更新 Xray-core"
+    echo "  update      更新核心程序"
     echo "  bbr         开启 BBR 拥塞控制"
     echo "  icmp        开启 ICMP (允许 ping)"
     echo "  help        显示此帮助信息"
@@ -1243,31 +1798,75 @@ main() {
         check_root
         echo ""
         echo -e "${CYAN}============================================${NC}"
-        echo -e "${GREEN}  Xray VLESS 一键安装${NC}"
+        echo -e "${GREEN}  Proxy-Toolkit 节点一键安装${NC}"
         echo -e "${CYAN}============================================${NC}"
         echo ""
 
         # 选择部署模式
-        local mode=$(select_mode)
-        local domain=""
+        local mode
+        mode=$(select_mode)
 
-        # CDN 模式需要域名
-        if [[ "$mode" == "cdn" ]]; then
-            domain=$(get_domain)
-        fi
+        # 停止可能正在运行的旧服务，避免端口冲突
+        resolve_service_vars
+        stop_service 2>/dev/null || true
 
         install_deps
         enable_bbr
         enable_icmp
 
-        # 检查端口
-        check_port 443
+        if [[ "$mode" == "direct" ]]; then
+            local port
+            port=$(get_reality_port)
+            check_port "$port" "tcp"
+            install_xray
+            generate_config "$mode" "" "$port"
+            configure_firewall "$port" "tcp"
+            install_service
+            show_info
+        elif [[ "$mode" == "hysteria" ]]; then
+            local hy_settings
+            hy_settings=$(get_hysteria_settings)
+            local port
+            local enable_hop
+            local hop_start
+            local hop_end
+            local password
+            local sni
+            local server_ip
 
-        install_xray
-        generate_config "$mode" "$domain"
-        configure_firewall
-        install_service
-        show_info
+            port=$(echo "$hy_settings" | cut -d'|' -f1)
+            enable_hop=$(echo "$hy_settings" | cut -d'|' -f2)
+            hop_start=$(echo "$hy_settings" | cut -d'|' -f3)
+            hop_end=$(echo "$hy_settings" | cut -d'|' -f4)
+            password=$(echo "$hy_settings" | cut -d'|' -f5)
+            sni=$(echo "$hy_settings" | cut -d'|' -f6)
+            server_ip=$(get_server_ip)
+
+            check_port "$port" "udp"
+            install_hysteria
+            generate_hysteria_cert "$sni"
+            generate_hysteria_config "$port" "$password" "$sni"
+            configure_firewall "$port" "udp"
+
+            if [[ "$enable_hop" == "true" && -n "$hop_start" && -n "$hop_end" ]]; then
+                configure_port_hopping "$port" "$hop_start" "$hop_end"
+                configure_firewall "${hop_start}:${hop_end}" "udp"
+            fi
+
+            install_hysteria_service
+            save_hysteria_info "$port" "$enable_hop" "$hop_start" "$hop_end" "$password" "$sni" "$server_ip"
+            show_info
+        elif [[ "$mode" == "cdn" ]]; then
+            local domain
+            domain=$(get_domain)
+            local port="443"
+            check_port "$port" "tcp"
+            install_xray
+            generate_config "$mode" "$domain" "$port"
+            configure_firewall "$port" "tcp"
+            install_service
+            show_info
+        fi
         ;;
     bbr)
         check_root
@@ -1279,7 +1878,7 @@ main() {
         ;;
     uninstall)
         check_root
-        uninstall_xray
+        uninstall_node
         ;;
     status)
         show_status
@@ -1293,7 +1892,7 @@ main() {
         ;;
     update)
         check_root
-        update_xray
+        update_node
         ;;
     help | --help | -h)
         show_usage
