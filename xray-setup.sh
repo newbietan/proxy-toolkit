@@ -241,7 +241,7 @@ install_firewall() {
 
 # 检测端口占用并处理
 check_port() {
-    local port="${1:-8443}"
+    local port="${1:-443}"
     local proto="${2:-tcp}"
     log_info "检查端口 ${port}/${proto} 占用情况..."
 
@@ -417,7 +417,7 @@ select_mode() {
     echo "" >&2
     echo -e "  ${BLUE}1)${NC} 直连模式 (VLESS + Reality) - TCP" >&2
     echo -e "     - 速度快、延迟低、伪装强、无需域名" >&2
-    echo -e "     - 默认监听备用 HTTPS 端口 8443 (可自定义)" >&2
+    echo -e "     - 默认监听标准 HTTPS 端口 443 (可自定义)" >&2
     echo "" >&2
     echo -e "  ${BLUE}2)${NC} 极速抗封锁模式 (Hysteria 2) - UDP" >&2
     echo -e "     - 基于魔改 QUIC，暴力抗丢包，弱网加速效果拔群" >&2
@@ -528,10 +528,10 @@ get_reality_port() {
         echo -e "${CYAN}--------------------------------------------${NC}" >&2
         echo -e "${GREEN}  Reality 端口设置${NC}" >&2
         echo -e "${CYAN}--------------------------------------------${NC}" >&2
-        echo -e "提示: 443 端口在部分地区受到审查或阻断，推荐使用备用 HTTPS 端口 8443 或高位端口。" >&2
-        echo -n "请输入 Reality 监听端口 [默认: 8443]: " >&2
+        echo -e "提示: 443 为标准 HTTPS 端口，隐蔽性与伪装效果最佳；如本地网络限制可输入其他端口。" >&2
+        echo -n "请输入 Reality 监听端口 [默认: 443]: " >&2
         read -r port
-        port="${port:-8443}"
+        port="${port:-443}"
         if [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; then
             echo "$port"
             return 0
@@ -990,7 +990,7 @@ EOF
 
 # 配置防火墙
 configure_firewall() {
-    local port="${1:-8443}"
+    local port="${1:-443}"
     local proto="${2:-tcp}"
     log_info "配置防火墙，放行 SSH (22/tcp) 和服务端口 (${port}/${proto})..."
 
@@ -1232,7 +1232,7 @@ update_hysteria() {
 generate_config() {
     local mode="${1:-direct}"
     local domain="${2:-}"
-    local port="${3:-8443}"
+    local port="${3:-443}"
 
     log_info "生成配置..."
 
@@ -1639,7 +1639,7 @@ show_info() {
 
     # 直连模式信息
     if [[ "$mode" == "direct" ]]; then
-        local port="${PORT:-${SERVER_PORT:-8443}}"
+        local port="${PORT:-${SERVER_PORT:-443}}"
         local reality_link="vless://${UUID}@${SERVER_IP}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#Xray-Reality"
 
         echo ""

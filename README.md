@@ -6,7 +6,7 @@
 
 | 模式 | 协议 | 传输层 | 特点 | 适用场景 |
 | --- | --- | --- | --- | --- |
-| **直连模式** | VLESS + Reality | TCP | 速度快、延迟低、大厂 TLS 伪装强，默认监听 8443 (可自定义)，无需域名 | IP 稳定、追求轻量性能 |
+| **直连模式** | VLESS + Reality | TCP | 速度快、延迟低、大厂 TLS 伪装强，默认监听 443 (可自定义)，无需域名 | IP 稳定、追求轻量性能 |
 | **极速模式** | Hysteria 2 | UDP (QUIC) | 暴力抗丢包（自研 Brutal 拥塞控制），支持端口跳跃 (Port Hopping)，内置自签证书 | 跨洋弱网严重、晚高峰丢包、防端口封禁/QoS |
 | **CDN 模式** | VLESS + XHTTP + Cloudflare | HTTP/TLS | 隐藏源站 IP、穿透 WAF，IP 被墙依然可用，需自备域名接入 Cloudflare | IP 易被墙、需要长期稳定备用 |
 
@@ -32,7 +32,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/newbietan/proxy-toolkit/main
 
 安装时会提示选择部署模式：
 
-- **直连模式 (Reality)**: 提示输入监听端口（默认推荐 `8443`，可自定义），自动完成配置。
+- **直连模式 (Reality)**: 提示输入监听端口（默认推荐 `443`，可自定义），自动完成配置。
 - **极速模式 (Hysteria 2)**: 提示输入监听端口（默认 `8443`）、是否开启端口跳跃（默认 `20000-50000`）、认证密码（回车随机生成）及伪装 SNI（默认 `www.bing.com`），内置 EC 自签证书。
 - **CDN 模式**: 需要提前准备域名并接入 Cloudflare，添加 A 记录指向服务器并申请 Cloudflare Origin 证书。
 
@@ -85,7 +85,7 @@ proxies:
   - name: "Xray-Reality"
     type: vless
     server: <服务器IP>
-    port: 8443
+    port: 443
     uuid: <UUID>
     network: tcp
     tls: true
@@ -143,7 +143,7 @@ proxies:
   "type": "vless",
   "tag": "xray-reality",
   "server": "<服务器IP>",
-  "server_port": 8443,
+  "server_port": 443,
   "uuid": "<UUID>",
   "flow": "xtls-rprx-vision",
   "tls": {
@@ -230,9 +230,9 @@ proxies:
 
 ## 常见问题
 
-### 1. 为什么 Reality 推荐使用非 443 端口？
+### 1. 为什么 Reality 默认使用 443 端口，又支持自定义？
 
-国内许多地区运营商和政企网络对境外未备案 IP 的 443/80 端口实施了针对性的白名单拦截或 QoS 丢包。改用备用 HTTPS 端口（如 `8443`）或高位随机端口能有效避开此类针对性阻断。
+Reality 借用真实网站的 TLS 握手特征作为伪装，而公网绝大部分 HTTPS 服务均运行在标准 443 端口，因此使用 443 端口能达到最高的伪装与隐蔽效果。如果用户所在地区的运营商对境外 IP 的 443 端口存在封锁或丢包，脚本也支持在安装时自定义其他备用端口（如 8443 或高位端口）。
 
 ### 2. 什么是端口跳跃 (Port Hopping)？
 
