@@ -1522,11 +1522,28 @@ configure_port_hopping() {
     fi
 }
 
-# 清理端口跳跃规则
+# 清理全部端口跳跃 iptables 规则
+cleanup_all_port_hopping() {
+    if command -v iptables &>/dev/null; then
+        local rule_num
+        while rule_num=$(iptables -t nat -L PREROUTING --line-numbers -n 2>/dev/null | grep "REDIRECT" | grep "udp" | awk '{print $1}' | head -1) && [[ -n "$rule_num" ]]; do
+            iptables -t nat -D PREROUTING "$rule_num" 2>/dev/null || break
+        done
+
+        if command -v iptables-save &>/dev/null; then
+            iptables-save >/etc/iptables.rules 2>/dev/null || true
+        fi
+        if command -v netfilter-persistent &>/dev/null; then
+            netfilter-persistent save >/dev/null 2>&1 || true
+        fi
+    fi
+}
+
+# 清理端口跳跃规则 (兼容精确传参与全量清理)
 cleanup_port_hopping() {
-    local target_port="$1"
-    local hop_start="$2"
-    local hop_end="$3"
+    local target_port="${1:-}"
+    local hop_start="${2:-}"
+    local hop_end="${3:-}"
 
     if [[ -n "$target_port" && -n "$hop_start" && -n "$hop_end" ]] && command -v iptables &>/dev/null; then
         log_info "清理 iptables 端口跳跃规则: ${hop_start}:${hop_end} -> ${target_port}..."
@@ -1538,6 +1555,8 @@ cleanup_port_hopping() {
         if command -v netfilter-persistent &>/dev/null; then
             netfilter-persistent save >/dev/null 2>&1 || true
         fi
+    else
+        cleanup_all_port_hopping
     fi
 }
 
@@ -2004,51 +2023,84 @@ EOF
 # 卸载节点服务
 uninstall_node() {
     resolve_service_vars
-    log_warn "即将卸载当前节点服务 (${CORE_TYPE:-xray})..."
-    local confirm=""
-    read -r -p "确认卸载? (y/N): " confirm
-    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
-        log_info "取消卸载"
-        return
+
+    # 智能探测系统中实际存在的组件 (防止 install-info.conf 丢失或记录不准)
+    local has_xray=false
+    local has_hysteria=false
+
+    if [[ -f "/etc/systemd/system/xray.service" ]] || [[ -f "/etc/init.d/xray" ]] || [[ -f "${XRAY_DIR}/xray" ]] || [[ -d "${XRAY_CONFIG_DIR}" ]]; then
+        has_xray=true
+    fi
+    if [[ -f "/etc/systemd/system/hysteria-server.service" ]] || [[ -f "/etc/init.d/hysteria-server" ]] || [[ -f "${HYSTERIA_DIR}/hysteria" ]] || [[ -d "${HYSTERIA_CONFIG_DIR}" ]]; then
+        has_hysteria=true
     fi
 
-    # 停止服务
-    stop_service
+    if [[ "$has_xray" == "false" && "$has_hysteria" == "false" && ! -f "${INSTALL_INFO}" ]]; then
+        log_warn "未检测到已安装的代理节点服务或配置文件"
+        return 0
+    fi
 
-    # 删除服务文件
+    echo ""
+    echo -e "${YELLOW}检测到系统已安装/残留以下节点组件:${NC}"
+    if [[ "$has_xray" == "true" ]]; then
+        echo -e "  • ${CYAN}Xray-core${NC} 服务与配置文件 (${XRAY_DIR}/xray, ${XRAY_CONFIG_DIR})"
+    fi
+    if [[ "$has_hysteria" == "true" ]]; then
+        echo -e "  • ${CYAN}Hysteria 2${NC} 服务与配置文件 (${HYSTERIA_DIR}/hysteria, ${HYSTERIA_CONFIG_DIR})"
+    fi
+    if command -v iptables &>/dev/null && iptables -t nat -L PREROUTING -n 2>/dev/null | grep -q "REDIRECT.*udp"; then
+        echo -e "  • ${CYAN}iptables${NC} 端口跳跃转发规则"
+    fi
+    echo ""
+
+    local confirm=""
+    read -r -p "确认彻底卸载并清理上述所有服务与文件? (y/N): " confirm
+    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+        log_info "取消卸载"
+        return 0
+    fi
+
+    log_info "正在停止所有相关服务..."
+    stop_all_services
+
     local init_system
     init_system=$(get_init_system)
+
+    log_info "清理系统服务单元文件..."
     case ${init_system} in
     systemd)
-        rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
+        rm -f "/etc/systemd/system/xray.service"
+        rm -f "/etc/systemd/system/hysteria-server.service"
         systemctl daemon-reload 2>/dev/null || true
         ;;
     openrc)
-        rc-update del "${SERVICE_NAME}" 2>/dev/null || true
-        rm -f "/etc/init.d/${SERVICE_NAME}"
+        rc-update del xray 2>/dev/null || true
+        rc-update del hysteria-server 2>/dev/null || true
+        rm -f "/etc/init.d/xray" "/etc/init.d/hysteria-server"
         ;;
     *)
-        rm -f "/usr/local/bin/${CORE_TYPE}-start" "/usr/local/bin/${CORE_TYPE}-stop"
-        rm -f "${PID_FILE}"
+        rm -f "/usr/local/bin/xray-start" "/usr/local/bin/xray-stop"
+        rm -f "/usr/local/bin/hysteria-start" "/usr/local/bin/hysteria-stop"
+        rm -f "/var/run/xray.pid" "/var/run/hysteria.pid"
         ;;
     esac
 
-    # 删除文件
-    if [[ "${CORE_TYPE}" == "hysteria" ]]; then
-        if [[ "${HOPPING_ENABLED:-false}" == "true" && -n "${PORT:-}" && -n "${HOP_START:-}" && -n "${HOP_END:-}" ]]; then
-            cleanup_port_hopping "${PORT}" "${HOP_START}" "${HOP_END}"
-        fi
-        rm -f "${HYSTERIA_DIR}/hysteria"
-        rm -rf "${HYSTERIA_CONFIG_DIR}"
-        rm -rf "${HYSTERIA_LOG}"
-    else
-        rm -f "${XRAY_DIR}/xray"
-        rm -rf "${XRAY_CONFIG_DIR}"
-        rm -rf "${XRAY_LOG}"
-    fi
+    log_info "清理核心二进制程序与配置数据..."
+    rm -f "${XRAY_DIR}/xray"
+    rm -rf "${XRAY_CONFIG_DIR}"
+    rm -rf "${XRAY_LOG}"
+
+    rm -f "${HYSTERIA_DIR}/hysteria"
+    rm -rf "${HYSTERIA_CONFIG_DIR}"
+    rm -rf "${HYSTERIA_LOG}"
+
+    log_info "清理 iptables 端口跳跃转发规则..."
+    cleanup_all_port_hopping
 
     rm -f "${INSTALL_INFO}"
-    log_info "卸载完成"
+    rm -f /var/run/xray.pid /var/run/hysteria.pid 2>/dev/null || true
+
+    log_info "节点卸载完成，所有组件及规则已彻底清除"
 }
 
 # 兼容旧函数名
