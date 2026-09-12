@@ -541,6 +541,356 @@ get_reality_port() {
     done
 }
 
+# 获取服务器地理位置与 ASN 信息
+# 返回格式: countryCode|asn|isp
+get_server_profile() {
+    local ip="$1"
+    local country_code=""
+    local asn=""
+    local isp=""
+
+    # 优先使用 ip-api.com
+    local info_json=""
+    if [[ -n "$ip" && "$ip" != "<YOUR_SERVER_IP>" ]]; then
+        info_json=$(curl -s --connect-timeout 3 -m 4 "http://ip-api.com/json/${ip}?fields=status,country,countryCode,as,isp" 2>/dev/null)
+    fi
+
+    if [[ -n "$info_json" ]] && echo "$info_json" | grep -q '"status":"success"'; then
+        country_code=$(echo "$info_json" | grep -o '"countryCode":"[^"]*"' | head -1 | cut -d'"' -f4)
+        asn=$(echo "$info_json" | grep -o '"as":"[^"]*"' | head -1 | cut -d'"' -f4 | grep -oE 'AS[0-9]+' | head -1)
+        isp=$(echo "$info_json" | grep -o '"isp":"[^"]*"' | head -1 | cut -d'"' -f4)
+    fi
+
+    # 备用方案: ipinfo.io
+    if [[ -z "$country_code" ]]; then
+        local ipinfo_org=""
+        country_code=$(curl -s --connect-timeout 3 -m 4 "https://ipinfo.io/country" 2>/dev/null | tr -d ' \n\r' | grep -E '^[A-Z]{2}$')
+        ipinfo_org=$(curl -s --connect-timeout 3 -m 4 "https://ipinfo.io/org" 2>/dev/null)
+        asn=$(echo "$ipinfo_org" | grep -oE 'AS[0-9]+' | head -1)
+        isp=$(echo "$ipinfo_org" | sed -E 's/^AS[0-9]+ //' | tr -d '\n\r')
+    fi
+
+    country_code="${country_code:-US}"
+    asn="${asn:-UNKNOWN}"
+    isp="${isp:-Unknown ISP}"
+
+    echo "${country_code}|${asn}|${isp}"
+}
+
+# 根据 ASN 和地理位置生成候选 Reality 伪装域名
+get_reality_candidates() {
+    local country="$1"
+    local asn="$2"
+    local list=()
+
+    # 1. 根据 ASN 优先匹配同机房/同运营商源站（网络拓扑与流量归属极其自然）
+    case "$asn" in
+    AS31898 | AS17012 | AS20940) # Oracle Cloud
+        list+=("www.oracle.com")
+        ;;
+    AS16509 | AS14618) # Amazon AWS
+        list+=("aws.amazon.com" "docs.aws.amazon.com")
+        ;;
+    AS8075) # Microsoft Azure
+        list+=("learn.microsoft.com")
+        ;;
+    AS14061) # DigitalOcean
+        list+=("cloud.digitalocean.com")
+        ;;
+    AS24940) # Hetzner
+        list+=("www.hetzner.com")
+        ;;
+    AS16276) # OVH
+        list+=("www.ovhcloud.com")
+        ;;
+    esac
+
+    # 2. 根据国家/地区匹配当地高信誉教育/本土非 CDN 站点 (经过实测均支持 TLS 1.3 + ALPN h2)
+    case "$country" in
+    US)
+        list+=("www.stanford.edu" "www.berkeley.edu" "www.usc.edu" "www.nvidia.com" "gateway.icloud.com")
+        ;;
+    JP)
+        list+=("www.kyoto-u.ac.jp" "www.linefriends.jp" "gateway.icloud.com")
+        ;;
+    HK)
+        list+=("www.ust.hk" "www.hku.hk" "www.cuhk.edu.hk")
+        ;;
+    SG)
+        list+=("www.ntu.edu.sg" "www.singtel.com" "www.nus.edu.sg")
+        ;;
+    DE | FR | GB | NL | EU)
+        list+=("www.ox.ac.uk" "www.cam.ac.uk" "www.kernel.org" "www.tum.de")
+        ;;
+    *)
+        list+=("gateway.icloud.com" "itunes.apple.com" "swdist.apple.com" "www.nvidia.com")
+        ;;
+    esac
+
+    # 3. 兜底保障
+    list+=("gateway.icloud.com" "itunes.apple.com")
+
+    # 去重输出
+    printf "%s\n" "${list[@]}" | awk '!seen[$0]++'
+}
+
+# 本地轻量探针：验证目标域名是否满足 Reality 要求并测算延迟与得分
+# 输出: score|latency|status
+probe_reality_domain() {
+    local domain="$1"
+    local is_same_asn="${2:-0}"
+
+    local curl_out
+    curl_out=$(curl -sIv --connect-timeout 2 -m 3 "https://${domain}" 2>&1)
+    local curl_exit=$?
+
+    if [[ $curl_exit -ne 0 ]] && ! echo "$curl_out" | grep -qi "Connected to"; then
+        echo "0|9999|连接失败"
+        return
+    fi
+
+    # 验证 TLS 1.3
+    local is_tls13=0
+    if echo "$curl_out" | grep -qiE "SSL connection using TLSv1\.3|SSL connection using TLS 1\.3"; then
+        is_tls13=1
+    elif command -v openssl &>/dev/null; then
+        local ssl_out
+        ssl_out=$(echo -n | openssl s_client -connect "${domain}:443" -servername "${domain}" -tls1_3 2>&1)
+        if echo "$ssl_out" | grep -qi "Protocol.*TLSv1\.3" && ! echo "$ssl_out" | grep -qiE "Cipher is \(NONE\)|no peer certificate available"; then
+            is_tls13=1
+        fi
+    fi
+
+    if [[ $is_tls13 -eq 0 ]]; then
+        echo "0|9999|不支持 TLS 1.3"
+        return
+    fi
+
+    # 验证 ALPN h2
+    local is_h2=0
+    if echo "$curl_out" | grep -qiE "ALPN.*accepted.*h2|server accepted h2|using HTTP/2|HTTP/2 [0-9]{3}"; then
+        is_h2=1
+    fi
+
+    if [[ $is_h2 -eq 0 ]]; then
+        echo "0|9999|不支持 ALPN h2"
+        return
+    fi
+
+    # 测量握手延迟
+    local time_conn
+    time_conn=$(curl -o /dev/null -s -w "%{time_connect}\n" --connect-timeout 2 "https://${domain}" 2>/dev/null)
+    local latency=999
+    if [[ -n "$time_conn" && "$time_conn" != "0.000" && "$time_conn" != "0" ]]; then
+        latency=$(awk "BEGIN {printf \"%d\", $time_conn * 1000}")
+    fi
+
+    # 计算推荐分
+    local score=100
+    if [[ "$is_same_asn" -eq 1 ]]; then
+        score=$((score + 50))
+    fi
+    local penalty=$((latency / 3))
+    score=$((score - penalty))
+    if [[ $score -lt 10 ]]; then
+        score=10
+    fi
+
+    echo "${score}|${latency}|OK"
+}
+
+# 交互式获取并确认最优 Reality 伪装域名
+get_reality_domain() {
+    local server_ip="$1"
+
+    echo "" >&2
+    echo -e "${CYAN}--------------------------------------------${NC}" >&2
+    echo -e "${GREEN}  Reality 伪装域名设置 (智能环境感知)${NC}" >&2
+    echo -e "${CYAN}--------------------------------------------${NC}" >&2
+
+    echo -e "正在分析服务器网络画像..." >&2
+    local profile
+    profile=$(get_server_profile "$server_ip")
+    local country
+    local asn
+    local isp
+    country=$(echo "$profile" | cut -d'|' -f1)
+    asn=$(echo "$profile" | cut -d'|' -f2)
+    isp=$(echo "$profile" | cut -d'|' -f3)
+
+    echo -e "  • 服务器 IP:   ${CYAN}${server_ip}${NC}" >&2
+    echo -e "  • 地理位置:    ${CYAN}${country}${NC}" >&2
+    echo -e "  • 所属网络:    ${CYAN}${asn} (${isp})${NC}" >&2
+    echo "" >&2
+    echo -e "正在本地并发探测优质候选站点 (TLS 1.3 / ALPN h2 / RTT 握手耗时)..." >&2
+
+    local candidates=()
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && candidates+=("$line")
+    done < <(get_reality_candidates "$country" "$asn")
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local pids=()
+
+    for d in "${candidates[@]}"; do
+        local is_same_asn=0
+        if [[ "$asn" =~ AS31898|AS17012|AS20940 ]] && [[ "$d" =~ oracle ]]; then
+            is_same_asn=1
+        elif [[ "$asn" =~ AS16509|AS14618 ]] && [[ "$d" =~ amazon ]]; then
+            is_same_asn=1
+        elif [[ "$asn" =~ AS8075 ]] && [[ "$d" =~ microsoft ]]; then
+            is_same_asn=1
+        elif [[ "$asn" =~ AS14061 ]] && [[ "$d" =~ digitalocean ]]; then
+            is_same_asn=1
+        elif [[ "$asn" =~ AS24940 ]] && [[ "$d" =~ hetzner ]]; then
+            is_same_asn=1
+        elif [[ "$asn" =~ AS16276 ]] && [[ "$d" =~ ovhcloud ]]; then
+            is_same_asn=1
+        fi
+
+        (
+            local res
+            res=$(probe_reality_domain "$d" "$is_same_asn")
+            echo "${d}|${res}|${is_same_asn}" >"${tmp_dir}/${d}.txt"
+        ) &
+        pids+=($!)
+    done
+
+    for pid in "${pids[@]}"; do
+        wait "$pid" 2>/dev/null || true
+    done
+
+    local valid_list=()
+    for f in "${tmp_dir}"/*.txt; do
+        [[ -f "$f" ]] || continue
+        local line
+        line=$(cat "$f")
+        local d
+        local sc
+        local lat
+        local st
+        local same
+        d=$(echo "$line" | cut -d'|' -f1)
+        sc=$(echo "$line" | cut -d'|' -f2)
+        lat=$(echo "$line" | cut -d'|' -f3)
+        st=$(echo "$line" | cut -d'|' -f4)
+        same=$(echo "$line" | cut -d'|' -f5)
+
+        if [[ "$sc" -gt 0 && "$st" == "OK" ]]; then
+            valid_list+=("${sc}|${lat}|${d}|${same}")
+        fi
+    done
+    rm -rf "${tmp_dir}"
+
+    local sorted_list=()
+    if [[ ${#valid_list[@]} -gt 0 ]]; then
+        while IFS= read -r l; do
+            [[ -n "$l" ]] && sorted_list+=("$l")
+        done < <(printf '%s\n' "${valid_list[@]}" | sort -t'|' -k1,1nr -k2,2n)
+    fi
+
+    # 打印检测通过的域名
+    local best_domain="gateway.icloud.com"
+    local idx=1
+    for item in "${sorted_list[@]}"; do
+        local sc=$(echo "$item" | cut -d'|' -f1)
+        local lat=$(echo "$item" | cut -d'|' -f2)
+        local d=$(echo "$item" | cut -d'|' -f3)
+        local same=$(echo "$item" | cut -d'|' -f4)
+
+        local tag=""
+        if [[ "$same" -eq 1 ]]; then
+            tag=" [同机房/ASN 推荐]"
+        fi
+
+        printf "  ${GREEN}[✓]${NC} %-25s 延迟: %4sms%b\n" "$d" "$lat" "${CYAN}${tag}${NC}" >&2
+        if [[ $idx -eq 1 ]]; then
+            best_domain="$d"
+        fi
+        ((idx++))
+    done
+
+    if [[ ${#sorted_list[@]} -eq 0 ]]; then
+        log_warn "候选站点探测均未达标，采用安全兜底域名: ${best_domain}" >&2
+    fi
+
+    echo "" >&2
+    echo -e "系统推荐最优伪装域名: ${GREEN}${best_domain}${NC}" >&2
+    echo -e "  ${BLUE}1)${NC} 使用系统推荐最优域名 [默认: ${best_domain}]" >&2
+    echo -e "  ${BLUE}2)${NC} 从检测合格列表中选择" >&2
+    echo -e "  ${BLUE}3)${NC} 手动输入自定义伪装域名 (自动合规性检测)" >&2
+    echo -n "请选择 [1/2/3, 默认 1]: " >&2
+    local choice
+    read -r choice
+    choice="${choice:-1}"
+
+    local final_domain="${best_domain}"
+    case "$choice" in
+    2)
+        if [[ ${#sorted_list[@]} -gt 0 ]]; then
+            echo "" >&2
+            local i=1
+            for item in "${sorted_list[@]}"; do
+                local lat=$(echo "$item" | cut -d'|' -f2)
+                local d=$(echo "$item" | cut -d'|' -f3)
+                echo -e "  ${BLUE}${i})${NC} ${d} (${lat}ms)" >&2
+                ((i++))
+            done
+            echo -n "请输入选择序号 [1-${#sorted_list[@]}]: " >&2
+            local num
+            read -r num
+            if [[ "$num" =~ ^[0-9]+$ ]] && [ "$num" -ge 1 ] && [ "$num" -le "${#sorted_list[@]}" ]; then
+                final_domain=$(echo "${sorted_list[$((num - 1))]}" | cut -d'|' -f3)
+            else
+                log_warn "输入无效，已使用系统推荐域名: ${best_domain}" >&2
+            fi
+        else
+            log_warn "无可用列表，已使用系统推荐域名: ${best_domain}" >&2
+        fi
+        ;;
+    3)
+        while true; do
+            echo "" >&2
+            echo -n "请输入自定义伪装域名 (如 www.apple.com): " >&2
+            local custom_d
+            read -r custom_d
+            if [[ -z "$custom_d" ]]; then
+                echo -e "${YELLOW}输入为空，使用推荐域名: ${final_domain}${NC}" >&2
+                break
+            fi
+            echo -e "正在对 ${custom_d} 进行 TLS 1.3 / ALPN h2 合规性检测..." >&2
+            local check
+            check=$(probe_reality_domain "$custom_d" 0)
+            local sc=$(echo "$check" | cut -d'|' -f1)
+            local lat=$(echo "$check" | cut -d'|' -f2)
+            local err=$(echo "$check" | cut -d'|' -f3)
+            if [[ "$sc" -gt 0 && "$err" == "OK" ]]; then
+                echo -e "${GREEN}[✓] 检测通过! 延迟: ${lat}ms，支持 TLS 1.3 及 ALPN h2${NC}" >&2
+                final_domain="$custom_d"
+                break
+            else
+                echo -e "${RED}[✗] 检测未通过: ${err}${NC}" >&2
+                echo -e "${YELLOW}提示: 该域名作为 Reality 伪装可能导致客户端连接失败 (reality verification failed)。${NC}" >&2
+                echo -n "是否仍要强制使用此域名？[y/N]: " >&2
+                local force_use
+                read -r force_use
+                if [[ "$force_use" =~ ^[Yy]$ ]]; then
+                    final_domain="$custom_d"
+                    break
+                fi
+            fi
+        done
+        ;;
+    *)
+        final_domain="${best_domain}"
+        ;;
+    esac
+
+    log_info "已选定 Reality 伪装域名: ${final_domain}" >&2
+    echo "$final_domain"
+}
+
 # 获取域名（CDN 模式用）
 get_domain() {
     echo "" >&2
@@ -810,7 +1160,8 @@ EOF
 
 # 安装服务（自动选择）
 install_service() {
-    local init_system=$(get_init_system)
+    local init_system
+    init_system=$(get_init_system)
     log_info "检测到 init 系统: ${init_system}"
 
     case ${init_system} in
@@ -824,11 +1175,14 @@ install_service() {
         install_nohup_service
         ;;
     esac
+
+    check_service_health
 }
 
 # 安装 Hysteria 服务（自动选择）
 install_hysteria_service() {
-    local init_system=$(get_init_system)
+    local init_system
+    init_system=$(get_init_system)
     log_info "检测到 init 系统: ${init_system}"
 
     case ${init_system} in
@@ -842,6 +1196,8 @@ install_hysteria_service() {
         install_hysteria_nohup_service
         ;;
     esac
+
+    check_service_health
 }
 
 # 停止服务
@@ -900,7 +1256,8 @@ start_service() {
 # 检查服务状态
 is_running() {
     resolve_service_vars
-    local init_system=$(get_init_system)
+    local init_system
+    init_system=$(get_init_system)
 
     case ${init_system} in
     systemd)
@@ -917,6 +1274,40 @@ is_running() {
         fi
         ;;
     esac
+}
+
+# 服务健康检查与故障自诊断
+check_service_health() {
+    resolve_service_vars
+    sleep 1
+
+    if is_running; then
+        log_info "${SERVICE_NAME} 服务运行正常"
+        return 0
+    fi
+
+    echo "" >&2
+    log_error "${SERVICE_NAME} 服务未能成功运行！" >&2
+    echo -e "${YELLOW}------------------- 故障诊断日志 -------------------${NC}" >&2
+
+    local init_system
+    init_system=$(get_init_system)
+
+    if [[ "$init_system" == "systemd" ]]; then
+        journalctl -u "${SERVICE_NAME}" -n 15 --no-pager 2>/dev/null || true
+    elif [[ -f "${XRAY_LOG}/error.log" && -s "${XRAY_LOG}/error.log" ]]; then
+        tail -n 15 "${XRAY_LOG}/error.log" 2>/dev/null || true
+    elif [[ -f "${HYSTERIA_LOG}/error.log" && -s "${HYSTERIA_LOG}/error.log" ]]; then
+        tail -n 15 "${HYSTERIA_LOG}/error.log" 2>/dev/null || true
+    elif [[ -f "${XRAY_LOG}/xray.log" && -s "${XRAY_LOG}/xray.log" ]]; then
+        tail -n 15 "${XRAY_LOG}/xray.log" 2>/dev/null || true
+    elif [[ -f "${HYSTERIA_LOG}/hysteria.log" && -s "${HYSTERIA_LOG}/hysteria.log" ]]; then
+        tail -n 15 "${HYSTERIA_LOG}/hysteria.log" 2>/dev/null || true
+    fi
+
+    echo -e "${YELLOW}----------------------------------------------------${NC}" >&2
+    log_warn "服务未能成功启动，请根据上述日志排查端口冲突或环境配置问题" >&2
+    exit 1
 }
 
 # ==================== 系统优化 ====================
@@ -988,11 +1379,11 @@ EOF
     return 0
 }
 
-# 配置防火墙
+# 配置防火墙（遵循最小侵入与增量放行原则）
 configure_firewall() {
     local port="${1:-443}"
     local proto="${2:-tcp}"
-    log_info "配置防火墙，放行 SSH (22/tcp) 和服务端口 (${port}/${proto})..."
+    log_info "配置防火墙，放行服务端口 (${port}/${proto})..."
 
     # 规范化端口表示：firewalld 端口范围使用 '-'，ufw/iptables 使用 ':'
     local port_dash="${port/:/-}"
@@ -1000,31 +1391,55 @@ configure_firewall() {
 
     # 检测防火墙类型
     if command -v ufw &>/dev/null; then
-        # Ubuntu/Debian ufw
-        log_info "检测到 ufw 防火墙"
-        ufw allow 22/tcp >/dev/null 2>&1 || true
-        ufw allow ${port_colon}/${proto} >/dev/null 2>&1 || true
-        ufw reload >/dev/null 2>&1 || true
-        log_info "ufw 已放行 22/tcp 和 ${port_colon}/${proto} 端口"
+        local ufw_active=false
+        if ufw status 2>/dev/null | grep -qw "active"; then
+            ufw_active=true
+        fi
+
+        if [[ "$ufw_active" == "true" ]]; then
+            # 原有防火墙运行中：严格遵循最小侵入原则，仅增量追加服务端口，不修改原有策略
+            ufw allow "${port_colon}/${proto}" >/dev/null 2>&1 || true
+            ufw reload >/dev/null 2>&1 || true
+            log_info "ufw 已增量放行服务端口: ${port_colon}/${proto}"
+        else
+            # 原有防火墙未激活：初次配置兜底放行基础管理端口 (22/tcp) 与本服务端口
+            ufw allow 22/tcp >/dev/null 2>&1 || true
+            ufw allow "${port_colon}/${proto}" >/dev/null 2>&1 || true
+            log_info "ufw 已配置必要端口: 22/tcp, ${port_colon}/${proto}"
+        fi
     elif command -v firewall-cmd &>/dev/null; then
-        # CentOS/RHEL firewalld
-        log_info "检测到 firewalld 防火墙"
-        firewall-cmd --permanent --add-port=22/tcp >/dev/null 2>&1 || true
-        firewall-cmd --permanent --add-port=${port_dash}/${proto} >/dev/null 2>&1 || true
-        firewall-cmd --reload >/dev/null 2>&1 || true
-        log_info "firewalld 已放行 22/tcp 和 ${port_dash}/${proto} 端口"
+        local fw_running=false
+        if firewall-cmd --state 2>/dev/null | grep -qw "running"; then
+            fw_running=true
+        fi
+
+        if [[ "$fw_running" == "true" ]]; then
+            # 原有防火墙运行中：仅增量放行服务端口
+            firewall-cmd --permanent --add-port="${port_dash}/${proto}" >/dev/null 2>&1 || true
+            firewall-cmd --reload >/dev/null 2>&1 || true
+            log_info "firewalld 已增量放行服务端口: ${port_dash}/${proto}"
+        else
+            # 原有防火墙未运行：初次配置放行基础管理端口 (22/tcp) 与本服务端口
+            firewall-cmd --permanent --add-port=22/tcp >/dev/null 2>&1 || true
+            firewall-cmd --permanent --add-port="${port_dash}/${proto}" >/dev/null 2>&1 || true
+            firewall-cmd --reload >/dev/null 2>&1 || true
+            log_info "firewalld 已配置必要端口: 22/tcp, ${port_dash}/${proto}"
+        fi
     elif command -v iptables &>/dev/null; then
-        # 通用 iptables
-        log_info "检测到 iptables 防火墙"
-        iptables -C INPUT -p tcp --dport 22 -j ACCEPT 2>/dev/null ||
-            iptables -I INPUT -p tcp --dport 22 -j ACCEPT
-        iptables -C INPUT -p ${proto} --dport ${port_colon} -j ACCEPT 2>/dev/null ||
-            iptables -I INPUT -p ${proto} --dport ${port_colon} -j ACCEPT
+        # 仅增量放行当前服务端口
+        iptables -C INPUT -p "${proto}" --dport "${port_colon}" -j ACCEPT 2>/dev/null ||
+            iptables -I INPUT -p "${proto}" --dport "${port_colon}" -j ACCEPT
+
+        # 若 INPUT 链存在默认 DROP 规则，确保 22 端口具备保底访问权限
+        if iptables -S INPUT 2>/dev/null | grep -q -- "-P INPUT DROP"; then
+            iptables -C INPUT -p tcp --dport 22 -j ACCEPT 2>/dev/null ||
+                iptables -I INPUT -p tcp --dport 22 -j ACCEPT
+        fi
+
         # 持久化
         if command -v iptables-save &>/dev/null; then
             iptables-save >/etc/iptables.rules 2>/dev/null || true
         fi
-        # 创建开机恢复脚本
         if [[ -d /etc/network/if-pre-up.d ]]; then
             cat >/etc/network/if-pre-up.d/iptables-restore <<'RESTORE'
 #!/bin/sh
@@ -1032,10 +1447,9 @@ iptables-restore < /etc/iptables.rules 2>/dev/null
 RESTORE
             chmod +x /etc/network/if-pre-up.d/iptables-restore 2>/dev/null || true
         fi
-        log_info "iptables 已放行 22/tcp 和 ${port_colon}/${proto} 端口"
+        log_info "iptables 已放行服务端口: ${port_colon}/${proto}"
     else
-        log_error "未检测到任何防火墙工具 (ufw/firewalld/iptables)，请手动安装后重试"
-        exit 1
+        log_warn "未检测到活跃的防火墙工具，已跳过防火墙端口放行"
     fi
 
     return 0
@@ -1127,15 +1541,26 @@ install_xray() {
     log_info "下载: ${download_url}"
 
     local tmp_dir=$(mktemp -d)
-    curl -L -o "${tmp_dir}/xray.zip" "${download_url}" || {
-        log_error "下载失败，请检查网络连接或使用代理"
+    if ! curl -fsSL -L --connect-timeout 10 -o "${tmp_dir}/xray.zip" "${download_url}"; then
+        log_error "下载 Xray-core 失败，请检查网络连接"
         rm -rf "${tmp_dir}"
         exit 1
-    }
+    fi
 
     # 安装
-    log_info "安装 Xray-core..."
-    unzip -o "${tmp_dir}/xray.zip" -d "${tmp_dir}" >/dev/null
+    log_info "解压并安装 Xray-core..."
+    if ! unzip -qo "${tmp_dir}/xray.zip" -d "${tmp_dir}" 2>/dev/null; then
+        log_error "解压 Xray-core 压缩包失败，可能下载文件不完整"
+        rm -rf "${tmp_dir}"
+        exit 1
+    fi
+
+    if [[ ! -f "${tmp_dir}/xray" ]]; then
+        log_error "未在压缩包中找到 xray 可执行文件"
+        rm -rf "${tmp_dir}"
+        exit 1
+    fi
+
     mv -f "${tmp_dir}/xray" "${XRAY_DIR}/xray"
     chmod +x "${XRAY_DIR}/xray"
     rm -rf "${tmp_dir}"
@@ -1197,6 +1622,11 @@ install_hysteria() {
     fi
 
     mkdir -p "${HYSTERIA_DIR}"
+    if [[ ! -s "${tmp_file}" ]] || [[ $(wc -c <"${tmp_file}" 2>/dev/null || echo 0) -lt 102400 ]]; then
+        log_error "Hysteria 2 二进制文件损坏或不完整"
+        rm -f "${tmp_file}"
+        exit 1
+    fi
     mv -f "${tmp_file}" "${HYSTERIA_DIR}/hysteria"
     chmod +x "${HYSTERIA_DIR}/hysteria"
 
@@ -1233,6 +1663,7 @@ generate_config() {
     local mode="${1:-direct}"
     local domain="${2:-}"
     local port="${3:-443}"
+    local reality_sni="${4:-gateway.icloud.com}"
 
     log_info "生成配置..."
 
@@ -1248,9 +1679,25 @@ generate_config() {
     # 生成密钥
     local uuid=$(generate_uuid)
     local keys=$(generate_keys)
-    local private_key=$(echo "$keys" | grep "Private" | awk '{print $NF}')
-    local public_key=$(echo "$keys" | grep "Public" | awk '{print $NF}')
+    local private_key=$(echo "$keys" | grep -i "Private" | awk '{print $NF}')
+    local public_key=$(echo "$keys" | grep -i "Public" | awk '{print $NF}')
     local short_id=$(generate_short_id)
+
+    if [[ -z "$uuid" ]]; then
+        log_error "生成 UUID 失败，请检查系统环境"
+        exit 1
+    fi
+
+    if [[ "$mode" == "direct" ]]; then
+        if [[ -z "$private_key" || -z "$public_key" ]]; then
+            log_error "生成 x25519 密钥对失败，请检查 Xray 是否具备执行权限"
+            exit 1
+        fi
+        if [[ -z "$short_id" ]]; then
+            log_error "生成 Short ID 失败"
+            exit 1
+        fi
+    fi
 
     # 获取服务器 IPv4
     local server_ip
@@ -1276,16 +1723,17 @@ generate_config() {
     "security": "reality",
     "realitySettings": {
       "show": false,
-      "dest": "www.cloudflare.com:443",
+      "dest": "${reality_sni}:443",
       "xver": 0,
-      "serverNames": ["www.cloudflare.com"],
+      "serverNames": ["${reality_sni}"],
       "privateKey": "$(json_escape "$private_key")",
       "shortIds": ["$(json_escape "$short_id")"]
     }
   },
   "sniffing": {
     "enabled": true,
-    "destOverride": ["http", "tls", "quic"]
+    "destOverride": ["http", "tls", "quic"],
+    "routeOnly": true
   }
 }
 EOF
@@ -1325,7 +1773,8 @@ EOF
   },
   "sniffing": {
     "enabled": true,
-    "destOverride": ["http", "tls", "quic"]
+    "destOverride": ["http", "tls", "quic"],
+    "routeOnly": true
   }
 }
 EOF
@@ -1381,6 +1830,11 @@ EOF
     fi
 
     # 保存安装信息
+    local saved_sni="www.cloudflare.com"
+    if [[ "$mode" == "direct" ]]; then
+        saved_sni="${reality_sni}"
+    fi
+
     cat >"${INSTALL_INFO}" <<EOF
 DEPLOY_MODE=${mode}
 CORE_TYPE=xray
@@ -1390,7 +1844,7 @@ PRIVATE_KEY=${private_key}
 PUBLIC_KEY=${public_key}
 SHORT_ID=${short_id}
 SERVER_IP=${server_ip}
-SNI=www.cloudflare.com
+SNI=${saved_sni}
 INSTALL_DATE="$(date '+%Y-%m-%d %H:%M:%S')"
 EOF
 
@@ -1406,16 +1860,26 @@ EOF
     log_info "配置生成完成"
 }
 
-# 生成 Hysteria 2 自签名证书
+# 生成 Hysteria 2 自签名证书 (包含标准 SAN 扩展与合规有效期)
 generate_hysteria_cert() {
     local sni="${1:-www.bing.com}"
     mkdir -p "${HYSTERIA_CONFIG_DIR}"
-    log_info "生成 EC (prime256v1) 自签名证书 (SNI: ${sni})..."
+    log_info "生成 EC (prime256v1) 自签名证书 (SNI: ${sni}, 带 SAN 扩展)..."
     openssl ecparam -genkey -name prime256v1 -out "${HYSTERIA_CONFIG_DIR}/server.key" 2>/dev/null
-    openssl req -new -x509 -days 3650 \
+
+    # 优先尝试使用 -addext 生成带 SAN 扩展的证书 (有效期限设为标准的 365 天)
+    if ! openssl req -new -x509 -days 365 \
         -key "${HYSTERIA_CONFIG_DIR}/server.key" \
         -out "${HYSTERIA_CONFIG_DIR}/server.crt" \
-        -subj "/CN=${sni}" 2>/dev/null
+        -subj "/CN=${sni}" \
+        -addext "subjectAltName = DNS:${sni}" 2>/dev/null; then
+        # 兼容旧版本 openssl
+        openssl req -new -x509 -days 365 \
+            -key "${HYSTERIA_CONFIG_DIR}/server.key" \
+            -out "${HYSTERIA_CONFIG_DIR}/server.crt" \
+            -subj "/CN=${sni}" 2>/dev/null
+    fi
+
     chmod 600 "${HYSTERIA_CONFIG_DIR}/server.key"
     chmod 644 "${HYSTERIA_CONFIG_DIR}/server.crt"
     log_info "Hysteria 2 自签名证书生成完成"
@@ -1762,10 +2226,91 @@ restart_service() {
     stop_service
     sleep 1
     start_service
+    check_service_health
     log_info "重启完成"
 }
 
 # ==================== 主流程 ====================
+
+# 交互式管理控制台
+show_menu() {
+    resolve_service_vars
+
+    local status_text="${RED}未运行${NC}"
+    if is_running; then
+        status_text="${GREEN}● 运行中${NC}"
+    fi
+
+    local core_name="未安装"
+    local mode_name="无"
+    local port_info="无"
+    local dest_info="无"
+
+    if [[ -f "${INSTALL_INFO}" ]]; then
+        # shellcheck disable=SC1090
+        source "${INSTALL_INFO}"
+        if [[ "${DEPLOY_MODE:-}" == "hysteria" ]]; then
+            core_name="Hysteria 2"
+            mode_name="极速模式 (UDP/QUIC)"
+            port_info="${PORT:-8443}"
+            dest_info="${SNI:-www.bing.com}"
+        elif [[ "${DEPLOY_MODE:-}" == "cdn" ]]; then
+            core_name="Xray-core"
+            mode_name="CDN 模式 (VLESS+XHTTP)"
+            port_info="443"
+            dest_info="${DOMAIN:-}"
+        else
+            core_name="Xray-core"
+            mode_name="直连模式 (VLESS+Reality)"
+            port_info="${PORT:-443}"
+            dest_info="${SNI:-}"
+        fi
+    fi
+
+    echo ""
+    echo -e "${CYAN}============================================${NC}"
+    echo -e "${GREEN}      Proxy-Toolkit 节点管理控制台${NC}"
+    echo -e "${CYAN}============================================${NC}"
+    echo -e "  服务状态: [ ${status_text} ]"
+    echo -e "  核心程序: ${CYAN}${core_name}${NC}"
+    echo -e "  部署模式: ${CYAN}${mode_name}${NC}"
+    echo -e "  监听端口: ${CYAN}${port_info}${NC}"
+    [[ -n "$dest_info" && "$dest_info" != "无" ]] && echo -e "  伪装目标: ${CYAN}${dest_info}${NC}"
+    echo -e "${CYAN}--------------------------------------------${NC}"
+    echo -e "  ${BLUE}1)${NC} 安装 / 重建节点服务"
+    echo -e "  ${BLUE}2)${NC} 查看当前节点信息与分享链接"
+    echo -e "  ${BLUE}3)${NC} 重启服务"
+    echo -e "  ${BLUE}4)${NC} 停止服务"
+    echo -e "  ${BLUE}5)${NC} 更新核心程序 (Xray / Hysteria 2)"
+    echo -e "  ${BLUE}6)${NC} 开启 BBR 拥塞控制"
+    echo -e "  ${BLUE}7)${NC} 开启 ICMP (允许 Ping)"
+    echo -e "  ${BLUE}8)${NC} 卸载节点服务"
+    echo -e "  ${BLUE}0)${NC} 退出面板"
+    echo -e "${CYAN}--------------------------------------------${NC}"
+    echo -n "请输入选项 [0-8, 默认 2]: "
+    local opt
+    read -r opt
+    opt="${opt:-2}"
+
+    case "$opt" in
+    1) main install ;;
+    2) main show ;;
+    3) main restart ;;
+    4)
+        check_root
+        stop_service
+        log_info "服务已停止"
+        ;;
+    5) main update ;;
+    6) main bbr ;;
+    7) main icmp ;;
+    8) main uninstall ;;
+    0) exit 0 ;;
+    *)
+        log_warn "无效选项"
+        ;;
+    esac
+}
 
 show_usage() {
     echo ""
@@ -1791,7 +2336,12 @@ show_usage() {
 }
 
 main() {
-    local cmd="${1:-help}"
+    local cmd="${1:-}"
+
+    if [[ -z "$cmd" ]]; then
+        show_menu
+        return
+    fi
 
     case "$cmd" in
     install)
@@ -1818,8 +2368,12 @@ main() {
             local port
             port=$(get_reality_port)
             check_port "$port" "tcp"
+            local server_ip
+            server_ip=$(get_server_ip)
+            local reality_sni
+            reality_sni=$(get_reality_domain "$server_ip")
             install_xray
-            generate_config "$mode" "" "$port"
+            generate_config "$mode" "" "$port" "$reality_sni"
             configure_firewall "$port" "tcp"
             install_service
             show_info
