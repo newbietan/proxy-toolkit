@@ -462,9 +462,10 @@ get_hysteria_settings() {
     # 1. 端口设置
     local port=""
     while true; do
-        echo -n "请输入 Hysteria 2 监听端口 [默认: 8443]: " >&2
+        echo -e "提示: 443 为标准 HTTP/3 (QUIC) 端口，穿透力与抗 QoS 最佳；如本地网络限制可输入其他端口。" >&2
+        echo -n "请输入 Hysteria 2 监听端口 [默认: 443]: " >&2
         read -r port
-        port="${port:-8443}"
+        port="${port:-443}"
         if [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; then
             break
         else
@@ -1160,6 +1161,10 @@ EOF
 
 # 安装服务（自动选择）
 install_service() {
+    SERVICE_NAME="xray"
+    CORE_TYPE="xray"
+    PID_FILE="/var/run/xray.pid"
+
     local init_system
     init_system=$(get_init_system)
     log_info "检测到 init 系统: ${init_system}"
@@ -1176,11 +1181,15 @@ install_service() {
         ;;
     esac
 
-    check_service_health
+    check_service_health "${SERVICE_NAME}"
 }
 
 # 安装 Hysteria 服务（自动选择）
 install_hysteria_service() {
+    SERVICE_NAME="${HYSTERIA_SERVICE_NAME}"
+    CORE_TYPE="hysteria"
+    PID_FILE="${HYSTERIA_PID_FILE}"
+
     local init_system
     init_system=$(get_init_system)
     log_info "检测到 init 系统: ${init_system}"
@@ -1197,7 +1206,29 @@ install_hysteria_service() {
         ;;
     esac
 
-    check_service_health
+    check_service_health "${HYSTERIA_SERVICE_NAME}"
+}
+
+# 停止所有代理服务 (用于安装前清理或模式切换)
+stop_all_services() {
+    local init_system
+    init_system=$(get_init_system)
+
+    case ${init_system} in
+    systemd)
+        systemctl stop xray 2>/dev/null || true
+        systemctl stop hysteria-server 2>/dev/null || true
+        ;;
+    openrc)
+        rc-service xray stop 2>/dev/null || true
+        rc-service hysteria-server stop 2>/dev/null || true
+        ;;
+    *)
+        pkill -x xray 2>/dev/null || true
+        pkill -x hysteria 2>/dev/null || true
+        rm -f /var/run/xray.pid /var/run/hysteria.pid 2>/dev/null || true
+        ;;
+    esac
 }
 
 # 停止服务
@@ -1268,7 +1299,7 @@ is_running() {
         ;;
     *)
         if [[ -f ${PID_FILE} ]]; then
-            kill -0 $(cat ${PID_FILE}) 2>/dev/null
+            kill -0 "$(cat "${PID_FILE}")" 2>/dev/null
         else
             return 1
         fi
@@ -1278,7 +1309,20 @@ is_running() {
 
 # 服务健康检查与故障自诊断
 check_service_health() {
-    resolve_service_vars
+    local target_svc="${1:-}"
+    if [[ -n "$target_svc" ]]; then
+        SERVICE_NAME="$target_svc"
+        if [[ "$target_svc" == "${HYSTERIA_SERVICE_NAME}" || "$target_svc" == "hysteria" ]]; then
+            CORE_TYPE="hysteria"
+            PID_FILE="${HYSTERIA_PID_FILE}"
+        else
+            CORE_TYPE="xray"
+            PID_FILE="/var/run/xray.pid"
+        fi
+    else
+        resolve_service_vars
+    fi
+
     sleep 1
 
     if is_running; then
@@ -1295,13 +1339,13 @@ check_service_health() {
 
     if [[ "$init_system" == "systemd" ]]; then
         journalctl -u "${SERVICE_NAME}" -n 15 --no-pager 2>/dev/null || true
-    elif [[ -f "${XRAY_LOG}/error.log" && -s "${XRAY_LOG}/error.log" ]]; then
+    elif [[ -f "${XRAY_LOG}/error.log" && -s "${XRAY_LOG}/error.log" && "${CORE_TYPE}" == "xray" ]]; then
         tail -n 15 "${XRAY_LOG}/error.log" 2>/dev/null || true
-    elif [[ -f "${HYSTERIA_LOG}/error.log" && -s "${HYSTERIA_LOG}/error.log" ]]; then
+    elif [[ -f "${HYSTERIA_LOG}/error.log" && -s "${HYSTERIA_LOG}/error.log" && "${CORE_TYPE}" == "hysteria" ]]; then
         tail -n 15 "${HYSTERIA_LOG}/error.log" 2>/dev/null || true
-    elif [[ -f "${XRAY_LOG}/xray.log" && -s "${XRAY_LOG}/xray.log" ]]; then
+    elif [[ -f "${XRAY_LOG}/xray.log" && -s "${XRAY_LOG}/xray.log" && "${CORE_TYPE}" == "xray" ]]; then
         tail -n 15 "${XRAY_LOG}/xray.log" 2>/dev/null || true
-    elif [[ -f "${HYSTERIA_LOG}/hysteria.log" && -s "${HYSTERIA_LOG}/hysteria.log" ]]; then
+    elif [[ -f "${HYSTERIA_LOG}/hysteria.log" && -s "${HYSTERIA_LOG}/hysteria.log" && "${CORE_TYPE}" == "hysteria" ]]; then
         tail -n 15 "${HYSTERIA_LOG}/hysteria.log" 2>/dev/null || true
     fi
 
@@ -1630,7 +1674,10 @@ install_hysteria() {
     mv -f "${tmp_file}" "${HYSTERIA_DIR}/hysteria"
     chmod +x "${HYSTERIA_DIR}/hysteria"
 
-    log_info "Hysteria 2 安装完成: $("${HYSTERIA_DIR}/hysteria" version 2>/dev/null | head -1)"
+    local hy_ver
+    hy_ver=$("${HYSTERIA_DIR}/hysteria" version 2>/dev/null | head -1 | awk '{print $NF}')
+    hy_ver="${hy_ver:-${latest_ver}}"
+    log_info "Hysteria 2 安装完成 (${hy_ver})"
 }
 
 # 更新 Hysteria 2
@@ -2089,6 +2136,7 @@ show_info() {
         exit 1
     fi
 
+    # shellcheck disable=SC1090
     source "${INSTALL_INFO}"
     local mode="${DEPLOY_MODE:-direct}"
 
@@ -2134,7 +2182,7 @@ show_info() {
 
     # 极速抗封锁模式 (Hysteria 2)
     if [[ "$mode" == "hysteria" ]]; then
-        local port="${PORT:-8443}"
+        local port="${PORT:-443}"
         local sni="${SNI:-www.bing.com}"
         local mport_param=""
         local hop_desc="未启用"
@@ -2252,7 +2300,7 @@ show_menu() {
         if [[ "${DEPLOY_MODE:-}" == "hysteria" ]]; then
             core_name="Hysteria 2"
             mode_name="极速模式 (UDP/QUIC)"
-            port_info="${PORT:-8443}"
+            port_info="${PORT:-443}"
             dest_info="${SNI:-www.bing.com}"
         elif [[ "${DEPLOY_MODE:-}" == "cdn" ]]; then
             core_name="Xray-core"
@@ -2357,8 +2405,7 @@ main() {
         mode=$(select_mode)
 
         # 停止可能正在运行的旧服务，避免端口冲突
-        resolve_service_vars
-        stop_service 2>/dev/null || true
+        stop_all_services 2>/dev/null || true
 
         install_deps
         enable_bbr
@@ -2407,8 +2454,8 @@ main() {
                 configure_firewall "${hop_start}:${hop_end}" "udp"
             fi
 
-            install_hysteria_service
             save_hysteria_info "$port" "$enable_hop" "$hop_start" "$hop_end" "$password" "$sni" "$server_ip"
+            install_hysteria_service
             show_info
         elif [[ "$mode" == "cdn" ]]; then
             local domain
