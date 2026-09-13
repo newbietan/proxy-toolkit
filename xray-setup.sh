@@ -479,11 +479,13 @@ get_hysteria_settings() {
     local hop_end=""
     echo "" >&2
     echo -e "${YELLOW}端口跳跃 (Port Hopping) 说明:${NC}" >&2
-    echo -e "  通过将大范围 UDP 端口转发至主端口，客户端可在多个端口间跳跃，" >&2
-    echo -e "  能有效瓦解运营商针对单一 UDP 端口的 QoS 限速与阻断。" >&2
-    echo -n "是否启用端口跳跃? (Y/n) [默认: Y]: " >&2
+    echo -e "  • 原理：通过将大范围 UDP 端口转发至主端口，应对运营商对单一 UDP 端口的持续限速。" >&2
+    echo -e "  • 影响：开启后部分客户端（如 dae/软路由等）会每隔数十秒硬重连一次，导致长连接掐断、" >&2
+    echo -e "         BBR 拥塞控制窗口重置及看视频/下载周期性断流卡顿；且需云平台安全组放行端口段。" >&2
+    echo -e "  • 建议：日常使用推荐保持默认关闭（主端口 443 伪装性与穿透力最高，连接长久稳定）。" >&2
+    echo -n "是否启用端口跳跃? (y/N) [默认: N - 推荐保持关闭]: " >&2
     read -r hop_choice
-    hop_choice="${hop_choice:-Y}"
+    hop_choice="${hop_choice:-N}"
 
     if [[ "$hop_choice" == "y" || "$hop_choice" == "Y" ]]; then
         enable_hop="true"
@@ -2504,6 +2506,8 @@ main() {
             if [[ "$enable_hop" == "true" && -n "$hop_start" && -n "$hop_end" ]]; then
                 configure_port_hopping "$port" "$hop_start" "$hop_end"
                 configure_firewall "${hop_start}:${hop_end}" "udp"
+            else
+                cleanup_all_port_hopping
             fi
 
             save_hysteria_info "$port" "$enable_hop" "$hop_start" "$hop_end" "$password" "$sni" "$server_ip"
