@@ -33,9 +33,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/newbietan/proxy-toolkit/main
 
 安装时会提示选择部署模式：
 
-- **直连模式 (Reality)**: 提示输入监听端口（默认推荐 `443`，可自定义），自动根据服务器网络画像（国家/地区、机房 ASN、握手延迟、TLS 1.3 与 ALPN h2 兼容性）智能探测并匹配最优伪装域名，一键完成配置。
-- **极速模式 (Hysteria 2)**: 提示输入监听端口（默认推荐 `443`，可自定义）、是否开启端口跳跃（默认推荐关闭 `N` 以获得最佳长连接与视频缓冲稳定性；仅在特定运营商对单端口严重限速时按需开启 `20000-50000`）、认证密码（回车随机生成）及伪装 SNI（默认 `www.bing.com`），内置 EC 自签证书。
-- **CDN 模式**: 需要提前准备域名并接入 Cloudflare，添加 A 记录指向服务器并申请 Cloudflare Origin 证书。
+- **直连模式 (Reality)**: 提示输入监听端口（默认推荐 `443`，可自定义），并发探测本机公网 IPv4 与 IPv6（支持双栈自动部署、自定义或手动补全 IPv6），自动根据服务器网络画像（国家/地区、机房 ASN、握手延迟、TLS 1.3 与 ALPN h2 兼容性）智能探测并匹配最优伪装域名，一键完成配置。
+- **极速模式 (Hysteria 2)**: 提示输入监听端口（默认推荐 `443`，可自定义）、是否开启端口跳跃（默认推荐关闭 `N` 以获得最佳长连接与视频缓冲稳定性；仅在特定运营商对单端口严重限速时按需开启 `20000-50000`）、并发探测并配置 IPv4/IPv6 节点、认证密码（回车随机生成）及伪装 SNI（默认 `www.bing.com`），内置 EC 自签证书。
+- **CDN 模式**: 需要提前准备域名并接入 Cloudflare，脚本自动探测 IPv4/IPv6 并提供对应的 Cloudflare DNS（A 记录 / AAAA 记录）配置指引，支持纯 IPv6 VPS 借 Cloudflare CDN 接入全网 IPv4 客户端。
 
 ## 卸载
 
@@ -64,10 +64,10 @@ bash <(curl -fsSL https://raw.githubusercontent.com/newbietan/proxy-toolkit/main
 安装完成后会自动输出：
 
 - 节点协议类型与状态
-- 服务器地址、端口（或端口跳跃范围）、UUID / 认证密码
+- 服务器地址（若启用双栈，同时输出 IPv4 与 IPv6 地址）、端口（或端口跳跃范围）、UUID / 认证密码
 - 公钥、Short ID（Reality 模式）
 - 伪装域名 (SNI)
-- 对应协议的一键导入分享链接（`vless://` 或 `hysteria2://`）
+- 对应协议的一键导入分享链接（双栈环境同时提供 IPv4 链接与带 `[IPv6]` 标准格式的 IPv6 链接）
 - 终端二维码（支持客户端直接扫码导入）
 
 ---
@@ -229,7 +229,7 @@ proxies:
 - **协议深度与证书规范化**: Xray 嗅探启用 `routeOnly: true` 避免破坏 TLS 原生握手；Hysteria 2 自签证书规范包含 `subjectAltName` (SAN) 扩展并遵循现代 TLS 有效期规范。
 - **Init 系统适配**: 完美支持 systemd、OpenRC (Alpine Linux) 及无 init 系统的 nohup 守护，开机自启动全自动配置。
 - **性能调优**: 自动检测并开启 Linux BBR 拥塞控制，自动放行 ICMP 允许网络连通性测试。
-- **纯 IPv4 简化与稳健绑定**: 移除 IPv6 冗余交互，监听 `0.0.0.0`，杜绝部分 VPS 因关闭 IPv6 内核而引发的启动失败。
+- **IPv4 / IPv6 双栈与自适应部署**: 安装时并发探测本机 IPv4 与 IPv6 公网地址，支持自动部署双栈节点、手动输入补充 IPv6 节点或纯 IPv6 节点；服务端自适应监听双栈通配地址（`::`），自动优化内核 `net.ipv6.bindv6only=0`，防火墙及端口跳跃规则同步适配 IPv4/IPv6（iptables & ip6tables），完美兼容纯 IPv6 VPS 与双栈 VPS。
 
 ---
 

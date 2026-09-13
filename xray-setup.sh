@@ -280,7 +280,7 @@ check_port() {
             pid=$(fuser "${port}/tcp" 2>/dev/null | tr -d ' ' | grep -v "^1$" | head -1)
         fi
         if [[ -z "$pid" ]] && command -v nc &>/dev/null; then
-            if nc -z -w1 127.0.0.1 "${port}" 2>/dev/null; then
+            if nc -z -w1 127.0.0.1 "${port}" 2>/dev/null || nc -z -w1 ::1 "${port}" 2>/dev/null; then
                 log_warn "端口 ${port} 已被占用，但无法获取占用进程信息"
                 log_error "请手动检查端口占用: lsof -i:${port} 或 ss -tlnp | grep :${port}"
                 exit 1
@@ -439,17 +439,201 @@ select_mode() {
     esac
 }
 
-# 获取服务器公网 IPv4
-get_server_ip() {
+# 校验 IPv4 格式
+is_valid_ipv4() {
+    local ip="$1"
+    [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]
+}
+
+# 校验 IPv6 格式
+is_valid_ipv6() {
+    local ip6
+    ip6=$(echo "$1" | tr -d '[]' | tr -d ' \r\n')
+    [[ "$ip6" =~ ^[0-9a-fA-F:]+$ ]] && [[ "$ip6" == *:* ]] && [[ "$ip6" != "::1" ]]
+}
+
+# 探测公网 IPv4
+detect_ipv4() {
     local ip=""
-    ip=$(curl -s4 --connect-timeout 5 https://ifconfig.me 2>/dev/null ||
-        curl -s4 --connect-timeout 5 https://api.ipify.org 2>/dev/null ||
-        curl -s4 --connect-timeout 5 https://ipinfo.io/ip 2>/dev/null)
+    ip=$(curl -s4 --connect-timeout 3 https://api.ipify.org 2>/dev/null ||
+        curl -s4 --connect-timeout 3 https://ifconfig.me 2>/dev/null ||
+        curl -s4 --connect-timeout 3 https://ipinfo.io/ip 2>/dev/null ||
+        curl -s4 --connect-timeout 3 https://4.ipw.cn 2>/dev/null)
+    if [[ -z "$ip" ]] && command -v ip &>/dev/null; then
+        ip=$(ip -4 addr show scope global 2>/dev/null | grep -v " 127\." | grep "inet " | awk '{print $2}' | cut -d'/' -f1 | head -n1)
+    fi
+    ip=$(echo "$ip" | tr -d ' \r\n')
+    if is_valid_ipv4 "$ip"; then
+        echo "$ip"
+    fi
+}
+
+# 探测公网 IPv6
+detect_ipv6() {
+    local ip6=""
+    ip6=$(curl -s6 --connect-timeout 3 https://api6.ipify.org 2>/dev/null ||
+        curl -s6 --connect-timeout 3 https://6.ipw.cn 2>/dev/null ||
+        curl -s6 --connect-timeout 3 https://v6.ident.me 2>/dev/null ||
+        curl -s6 --connect-timeout 3 https://ipv6.icanhazip.com 2>/dev/null)
+    if [[ -z "$ip6" ]] && command -v ip &>/dev/null; then
+        ip6=$(ip -6 addr show scope global 2>/dev/null | grep -v " temporary" | grep -v " fe80" | grep -v " fd00" | grep "inet6 " | awk '{print $2}' | cut -d'/' -f1 | head -n1)
+    fi
+    ip6=$(echo "$ip6" | tr -d '[]' | tr -d ' \r\n')
+    if is_valid_ipv6 "$ip6"; then
+        echo "$ip6"
+    fi
+}
+
+# 获取服务器公网 IPv4（兼容旧调用）
+get_server_ip() {
+    local ip
+    ip=$(detect_ipv4)
     if [[ -z "$ip" ]]; then
         ip="<YOUR_SERVER_IP>"
         log_warn "无法自动获取服务器 IPv4，请手动替换配置中的 <YOUR_SERVER_IP>" >&2
     fi
     echo "$ip"
+}
+
+# 获取服务器公网 IPv6
+get_server_ipv6() {
+    local ip6
+    ip6=$(detect_ipv6)
+    echo "$ip6"
+}
+
+# 交互式 IP 网络配置 (同时探测 IPv4/IPv6，支持确认、自定义与手动补全)
+# 返回格式: server_ip|server_ipv6
+configure_server_ips() {
+    echo "" >&2
+    echo -e "${CYAN}--------------------------------------------${NC}" >&2
+    echo -e "${GREEN}  服务器 IP 网络配置 (IPv4 / IPv6)${NC}" >&2
+    echo -e "${CYAN}--------------------------------------------${NC}" >&2
+    log_info "正在探测本机公网 IP 地址..." >&2
+
+    local detected_v4
+    detected_v4=$(detect_ipv4)
+    local detected_v6
+    detected_v6=$(detect_ipv6)
+
+    local server_ip=""
+    local server_ipv6=""
+
+    # 1. 配置 IPv4
+    if [[ -n "$detected_v4" ]]; then
+        echo -e "  • 检测到公网 IPv4: ${CYAN}${detected_v4}${NC}" >&2
+        while true; do
+            echo -n "请输入服务器 IPv4 [默认: ${detected_v4}, 回车确认, 输入 n 跳过 IPv4]: " >&2
+            local input_v4
+            read -r input_v4
+            input_v4="${input_v4:-$detected_v4}"
+            if [[ "$input_v4" == "n" || "$input_v4" == "N" ]]; then
+                server_ip=""
+                log_info "已跳过 IPv4 节点部署" >&2
+                break
+            elif is_valid_ipv4 "$input_v4"; then
+                server_ip="$input_v4"
+                break
+            else
+                log_warn "IPv4 格式不正确，请重新输入" >&2
+            fi
+        done
+    else
+        echo -e "  • ${YELLOW}未检测到公网 IPv4 (可能为 IPv6-Only 服务器)${NC}" >&2
+        while true; do
+            echo -n "如需配置 IPv4 请输入，否则直接回车跳过 [回车跳过]: " >&2
+            local input_v4
+            read -r input_v4
+            if [[ -z "$input_v4" || "$input_v4" == "n" || "$input_v4" == "N" ]]; then
+                server_ip=""
+                break
+            elif is_valid_ipv4 "$input_v4"; then
+                server_ip="$input_v4"
+                break
+            else
+                log_warn "IPv4 格式不正确，请重新输入" >&2
+            fi
+        done
+    fi
+
+    # 2. 配置 IPv6
+    if [[ -n "$detected_v6" ]]; then
+        echo -e "  • 检测到公网 IPv6: ${CYAN}${detected_v6}${NC}" >&2
+        while true; do
+            echo -n "是否启用 IPv6 节点？[Y/n，回车默认启用，或手动输入其他 IPv6 地址]: " >&2
+            local input_v6
+            read -r input_v6
+            if [[ -z "$input_v6" || "$input_v6" == "y" || "$input_v6" == "Y" ]]; then
+                server_ipv6="$detected_v6"
+                log_info "已启用 IPv6 节点: ${server_ipv6}" >&2
+                break
+            elif [[ "$input_v6" == "n" || "$input_v6" == "N" ]]; then
+                server_ipv6=""
+                log_info "已跳过 IPv6 节点部署" >&2
+                break
+            else
+                local clean_v6
+                clean_v6=$(echo "$input_v6" | tr -d '[]' | tr -d ' \r\n')
+                if is_valid_ipv6 "$clean_v6"; then
+                    server_ipv6="$clean_v6"
+                    log_info "使用自定义 IPv6: ${server_ipv6}" >&2
+                    break
+                else
+                    log_warn "IPv6 格式不正确，请重新输入" >&2
+                fi
+            fi
+        done
+    else
+        echo -e "  • ${YELLOW}未自动探测到公网 IPv6${NC}" >&2
+        while true; do
+            echo -n "是否手动输入 IPv6 地址部署 IPv6 节点？[y/N, 默认 N]: " >&2
+            local enable_v6_manual
+            read -r enable_v6_manual
+            enable_v6_manual="${enable_v6_manual:-N}"
+            if [[ "$enable_v6_manual" == "n" || "$enable_v6_manual" == "N" ]]; then
+                server_ipv6=""
+                break
+            elif [[ "$enable_v6_manual" == "y" || "$enable_v6_manual" == "Y" ]]; then
+                echo -n "请输入公网 IPv6 地址: " >&2
+                local manual_v6
+                read -r manual_v6
+                local clean_v6
+                clean_v6=$(echo "$manual_v6" | tr -d '[]' | tr -d ' \r\n')
+                if is_valid_ipv6 "$clean_v6"; then
+                    server_ipv6="$clean_v6"
+                    log_info "使用手动输入的 IPv6: ${server_ipv6}" >&2
+                    break
+                else
+                    log_warn "IPv6 格式不正确，请重新输入" >&2
+                fi
+            else
+                log_warn "输入无效，请输入 y 或 n" >&2
+            fi
+        done
+    fi
+
+    # 3. 兜底保障：必须至少存在一个有效 IP
+    if [[ -z "$server_ip" && -z "$server_ipv6" ]]; then
+        log_warn "未配置任何公网 IP，请手动输入至少一个 IP 地址" >&2
+        while true; do
+            echo -n "请输入服务器 IP (IPv4 或 IPv6): " >&2
+            local fallback_ip
+            read -r fallback_ip
+            local clean_ip
+            clean_ip=$(echo "$fallback_ip" | tr -d '[]' | tr -d ' \r\n')
+            if is_valid_ipv6 "$clean_ip"; then
+                server_ipv6="$clean_ip"
+                break
+            elif is_valid_ipv4 "$clean_ip"; then
+                server_ip="$clean_ip"
+                break
+            else
+                log_warn "IP 格式无效，请输入合法的 IPv4 或 IPv6 地址" >&2
+            fi
+        done
+    fi
+
+    echo "${server_ip}|${server_ipv6}"
 }
 
 # 获取 Hysteria 2 配置参数
@@ -562,6 +746,18 @@ get_server_profile() {
         country_code=$(echo "$info_json" | grep -o '"countryCode":"[^"]*"' | head -1 | cut -d'"' -f4)
         asn=$(echo "$info_json" | grep -o '"as":"[^"]*"' | head -1 | cut -d'"' -f4 | grep -oE 'AS[0-9]+' | head -1)
         isp=$(echo "$info_json" | grep -o '"isp":"[^"]*"' | head -1 | cut -d'"' -f4)
+    fi
+
+    # 备用方案: ipwho.is (具备 IPv6 AAAA 记录，支持纯 IPv6 环境及 IPv6 地理查询)
+    if [[ -z "$country_code" && -n "$ip" && "$ip" != "<YOUR_SERVER_IP>" ]]; then
+        local who_json=""
+        who_json=$(curl -s --connect-timeout 3 -m 4 "https://ipwho.is/${ip}" 2>/dev/null)
+        if [[ -n "$who_json" ]] && echo "$who_json" | grep -q '"success":true'; then
+            country_code=$(echo "$who_json" | grep -o '"country_code":"[^"]*"' | head -1 | cut -d'"' -f4)
+            local raw_asn=$(echo "$who_json" | grep -o '"asn":[0-9]*' | head -1 | cut -d':' -f2)
+            [[ -n "$raw_asn" ]] && asn="AS${raw_asn}"
+            isp=$(echo "$who_json" | grep -o '"isp":"[^"]*"' | head -1 | cut -d'"' -f4)
+        fi
     fi
 
     # 备用方案: ipinfo.io
@@ -704,7 +900,9 @@ probe_reality_domain() {
 
 # 交互式获取并确认最优 Reality 伪装域名
 get_reality_domain() {
-    local server_ip="$1"
+    local server_ip="${1:-}"
+    local server_ipv6="${2:-}"
+    local probe_ip="${server_ip:-$server_ipv6}"
 
     echo "" >&2
     echo -e "${CYAN}--------------------------------------------${NC}" >&2
@@ -713,7 +911,7 @@ get_reality_domain() {
 
     echo -e "正在分析服务器网络画像..." >&2
     local profile
-    profile=$(get_server_profile "$server_ip")
+    profile=$(get_server_profile "$probe_ip")
     local country
     local asn
     local isp
@@ -721,7 +919,12 @@ get_reality_domain() {
     asn=$(echo "$profile" | cut -d'|' -f2)
     isp=$(echo "$profile" | cut -d'|' -f3)
 
-    echo -e "  • 服务器 IP:   ${CYAN}${server_ip}${NC}" >&2
+    local ip_disp="${probe_ip}"
+    if [[ -n "$server_ip" && -n "$server_ipv6" ]]; then
+        ip_disp="${server_ip} (IPv6: ${server_ipv6})"
+    fi
+
+    echo -e "  • 服务器 IP:   ${CYAN}${ip_disp}${NC}" >&2
     echo -e "  • 地理位置:    ${CYAN}${country}${NC}" >&2
     echo -e "  • 所属网络:    ${CYAN}${asn} (${isp})${NC}" >&2
     echo "" >&2
@@ -1401,27 +1604,34 @@ EOF
     fi
 }
 
-# 开启 ICMP (允许 ping)
+# 开启 ICMP (允许 ping) 与双栈网络参数
 enable_icmp() {
-    log_info "配置 ICMP (允许 ping)..."
+    log_info "配置 ICMP (允许 ping) 与双栈网络参数..."
 
+    # 1. 允许 IPv4 ICMP Ping
     local current=$(cat /proc/sys/net/ipv4/icmp_echo_ignore_all 2>/dev/null)
-    if [[ "$current" == "0" ]]; then
-        log_info "ICMP 已启用"
-        return 0
+    if [[ "$current" != "0" ]]; then
+        echo 0 >/proc/sys/net/ipv4/icmp_echo_ignore_all 2>/dev/null || true
     fi
 
-    # 开启 ICMP
-    echo 0 >/proc/sys/net/ipv4/icmp_echo_ignore_all
+    # 2. 确保 IPv6 双栈 Wildcard 监听正常运作 (bindv6only=0)
+    if [[ -f /proc/sys/net/ipv6/bindv6only ]]; then
+        echo 0 >/proc/sys/net/ipv6/bindv6only 2>/dev/null || true
+    fi
 
-    # 持久化
-    cat >/etc/sysctl.d/99-icmp.conf <<EOF
+    # 持久化 sysctl
+    cat >/etc/sysctl.d/99-proxy-toolkit.conf <<EOF
 net.ipv4.icmp_echo_ignore_all = 0
+net.ipv6.bindv6only = 0
+net.ipv4.ip_forward = 1
 EOF
+    if [[ -d /proc/sys/net/ipv6 ]]; then
+        echo "net.ipv6.conf.all.forwarding = 1" >>/etc/sysctl.d/99-proxy-toolkit.conf
+    fi
 
-    sysctl -p /etc/sysctl.d/99-icmp.conf >/dev/null 2>&1
+    sysctl -p /etc/sysctl.d/99-proxy-toolkit.conf >/dev/null 2>&1 || true
 
-    log_info "ICMP 启用成功"
+    log_info "ICMP 及双栈网络参数配置完成"
     return 0
 }
 
@@ -1472,7 +1682,7 @@ configure_firewall() {
             log_info "firewalld 已配置必要端口: 22/tcp, ${port_dash}/${proto}"
         fi
     elif command -v iptables &>/dev/null; then
-        # 仅增量放行当前服务端口
+        # 仅增量放行当前服务端口 (IPv4)
         iptables -C INPUT -p "${proto}" --dport "${port_colon}" -j ACCEPT 2>/dev/null ||
             iptables -I INPUT -p "${proto}" --dport "${port_colon}" -j ACCEPT
 
@@ -1482,6 +1692,19 @@ configure_firewall() {
                 iptables -I INPUT -p tcp --dport 22 -j ACCEPT
         fi
 
+        # 同步增量放行 IPv6 服务端口 (如果存在 ip6tables)
+        if command -v ip6tables &>/dev/null; then
+            ip6tables -C INPUT -p "${proto}" --dport "${port_colon}" -j ACCEPT 2>/dev/null ||
+                ip6tables -I INPUT -p "${proto}" --dport "${port_colon}" -j ACCEPT 2>/dev/null || true
+            if ip6tables -S INPUT 2>/dev/null | grep -q -- "-P INPUT DROP"; then
+                ip6tables -C INPUT -p tcp --dport 22 -j ACCEPT 2>/dev/null ||
+                    ip6tables -I INPUT -p tcp --dport 22 -j ACCEPT 2>/dev/null || true
+            fi
+            if command -v ip6tables-save &>/dev/null; then
+                ip6tables-save >/etc/ip6tables.rules 2>/dev/null || true
+            fi
+        fi
+
         # 持久化
         if command -v iptables-save &>/dev/null; then
             iptables-save >/etc/iptables.rules 2>/dev/null || true
@@ -1489,11 +1712,14 @@ configure_firewall() {
         if [[ -d /etc/network/if-pre-up.d ]]; then
             cat >/etc/network/if-pre-up.d/iptables-restore <<'RESTORE'
 #!/bin/sh
-iptables-restore < /etc/iptables.rules 2>/dev/null
+iptables-restore < /etc/iptables.rules 2>/dev/null || true
+if [ -f /etc/ip6tables.rules ]; then
+    ip6tables-restore < /etc/ip6tables.rules 2>/dev/null || true
+fi
 RESTORE
             chmod +x /etc/network/if-pre-up.d/iptables-restore 2>/dev/null || true
         fi
-        log_info "iptables 已放行服务端口: ${port_colon}/${proto}"
+        log_info "iptables/ip6tables 已放行服务端口: ${port_colon}/${proto}"
     else
         log_warn "未检测到活跃的防火墙工具，已跳过防火墙端口放行"
     fi
@@ -1501,13 +1727,13 @@ RESTORE
     return 0
 }
 
-# 配置端口跳跃 (Port Hopping) iptables 重定向
+# 配置端口跳跃 (Port Hopping) iptables / ip6tables 重定向
 configure_port_hopping() {
     local target_port="$1"
     local hop_start="$2"
     local hop_end="$3"
 
-    log_info "配置 iptables UDP 端口跳跃转发: ${hop_start}:${hop_end} -> ${target_port}..."
+    log_info "配置 iptables/ip6tables UDP 端口跳跃转发: ${hop_start}:${hop_end} -> ${target_port}..."
     if command -v iptables &>/dev/null; then
         iptables -t nat -C PREROUTING -p udp --dport "${hop_start}:${hop_end}" -j REDIRECT --to-ports "${target_port}" 2>/dev/null ||
             iptables -t nat -A PREROUTING -p udp --dport "${hop_start}:${hop_end}" -j REDIRECT --to-ports "${target_port}"
@@ -1515,16 +1741,26 @@ configure_port_hopping() {
         if command -v iptables-save &>/dev/null; then
             iptables-save >/etc/iptables.rules 2>/dev/null || true
         fi
-        if command -v netfilter-persistent &>/dev/null; then
-            netfilter-persistent save >/dev/null 2>&1 || true
-        fi
-        log_info "iptables 端口跳跃规则配置完成"
-    else
-        log_warn "未检测到 iptables，端口跳跃重定向可能需要手动配置"
     fi
+
+    # IPv6 端口跳跃 (ip6tables nat REDIRECT)
+    if command -v ip6tables &>/dev/null; then
+        if ip6tables -t nat -L >/dev/null 2>&1; then
+            ip6tables -t nat -C PREROUTING -p udp --dport "${hop_start}:${hop_end}" -j REDIRECT --to-ports "${target_port}" 2>/dev/null ||
+                ip6tables -t nat -A PREROUTING -p udp --dport "${hop_start}:${hop_end}" -j REDIRECT --to-ports "${target_port}" 2>/dev/null || true
+            if command -v ip6tables-save &>/dev/null; then
+                ip6tables-save >/etc/ip6tables.rules 2>/dev/null || true
+            fi
+        fi
+    fi
+
+    if command -v netfilter-persistent &>/dev/null; then
+        netfilter-persistent save >/dev/null 2>&1 || true
+    fi
+    log_info "iptables/ip6tables 端口跳跃规则配置完成"
 }
 
-# 清理全部端口跳跃 iptables 规则
+# 清理全部端口跳跃 iptables / ip6tables 规则
 cleanup_all_port_hopping() {
     if command -v iptables &>/dev/null; then
         local rule_num
@@ -1535,9 +1771,22 @@ cleanup_all_port_hopping() {
         if command -v iptables-save &>/dev/null; then
             iptables-save >/etc/iptables.rules 2>/dev/null || true
         fi
-        if command -v netfilter-persistent &>/dev/null; then
-            netfilter-persistent save >/dev/null 2>&1 || true
+    fi
+
+    if command -v ip6tables &>/dev/null; then
+        if ip6tables -t nat -L >/dev/null 2>&1; then
+            local rule_num_v6
+            while rule_num_v6=$(ip6tables -t nat -L PREROUTING --line-numbers -n 2>/dev/null | grep "REDIRECT" | grep "udp" | awk '{print $1}' | head -1) && [[ -n "$rule_num_v6" ]]; do
+                ip6tables -t nat -D PREROUTING "$rule_num_v6" 2>/dev/null || break
+            done
+            if command -v ip6tables-save &>/dev/null; then
+                ip6tables-save >/etc/ip6tables.rules 2>/dev/null || true
+            fi
         fi
+    fi
+
+    if command -v netfilter-persistent &>/dev/null; then
+        netfilter-persistent save >/dev/null 2>&1 || true
     fi
 }
 
@@ -1547,12 +1796,21 @@ cleanup_port_hopping() {
     local hop_start="${2:-}"
     local hop_end="${3:-}"
 
-    if [[ -n "$target_port" && -n "$hop_start" && -n "$hop_end" ]] && command -v iptables &>/dev/null; then
-        log_info "清理 iptables 端口跳跃规则: ${hop_start}:${hop_end} -> ${target_port}..."
-        iptables -t nat -D PREROUTING -p udp --dport "${hop_start}:${hop_end}" -j REDIRECT --to-ports "${target_port}" 2>/dev/null || true
-
-        if command -v iptables-save &>/dev/null; then
-            iptables-save >/etc/iptables.rules 2>/dev/null || true
+    if [[ -n "$target_port" && -n "$hop_start" && -n "$hop_end" ]]; then
+        if command -v iptables &>/dev/null; then
+            log_info "清理 iptables 端口跳跃规则: ${hop_start}:${hop_end} -> ${target_port}..."
+            iptables -t nat -D PREROUTING -p udp --dport "${hop_start}:${hop_end}" -j REDIRECT --to-ports "${target_port}" 2>/dev/null || true
+            if command -v iptables-save &>/dev/null; then
+                iptables-save >/etc/iptables.rules 2>/dev/null || true
+            fi
+        fi
+        if command -v ip6tables &>/dev/null; then
+            if ip6tables -t nat -L >/dev/null 2>&1; then
+                ip6tables -t nat -D PREROUTING -p udp --dport "${hop_start}:${hop_end}" -j REDIRECT --to-ports "${target_port}" 2>/dev/null || true
+                if command -v ip6tables-save &>/dev/null; then
+                    ip6tables-save >/etc/ip6tables.rules 2>/dev/null || true
+                fi
+            fi
         fi
         if command -v netfilter-persistent &>/dev/null; then
             netfilter-persistent save >/dev/null 2>&1 || true
@@ -1732,6 +1990,8 @@ generate_config() {
     local domain="${2:-}"
     local port="${3:-443}"
     local reality_sni="${4:-gateway.icloud.com}"
+    local server_ip="${5:-}"
+    local server_ipv6="${6:-}"
 
     log_info "生成配置..."
 
@@ -1767,9 +2027,17 @@ generate_config() {
         fi
     fi
 
-    # 获取服务器 IPv4
-    local server_ip
-    server_ip=$(get_server_ip)
+    # 若未传入 IP，自动探测兜底
+    if [[ -z "$server_ip" && -z "$server_ipv6" ]]; then
+        server_ip=$(get_server_ip)
+        server_ipv6=$(get_server_ipv6)
+    fi
+
+    # 监听地址：若启用了 IPv6 则监听双栈通配地址 "::"，否则监听 "0.0.0.0"
+    local listen_addr="0.0.0.0"
+    if [[ -n "$server_ipv6" ]]; then
+        listen_addr="::"
+    fi
 
     # 根据模式生成配置（内置 JSON 生成，不依赖 jq，兼容 Alpine）
     local inbound_json=""
@@ -1779,7 +2047,7 @@ generate_config() {
         inbound_json=$(
             cat <<EOF
 {
-  "listen": "0.0.0.0",
+  "listen": "${listen_addr}",
   "port": ${port},
   "protocol": "vless",
   "settings": {
@@ -1819,7 +2087,7 @@ EOF
         inbound_json=$(
             cat <<EOF
 {
-  "listen": "0.0.0.0",
+  "listen": "${listen_addr}",
   "port": ${cdn_port},
   "protocol": "vless",
   "settings": {
@@ -1912,6 +2180,7 @@ PRIVATE_KEY=${private_key}
 PUBLIC_KEY=${public_key}
 SHORT_ID=${short_id}
 SERVER_IP=${server_ip}
+SERVER_IPV6=${server_ipv6}
 SNI=${saved_sni}
 INSTALL_DATE="$(date '+%Y-%m-%d %H:%M:%S')"
 EOF
@@ -2005,6 +2274,7 @@ save_hysteria_info() {
     local password="$5"
     local sni="$6"
     local server_ip="$7"
+    local server_ipv6="${8:-}"
 
     mkdir -p "${XRAY_CONFIG_DIR}"
     cat >"${INSTALL_INFO}" <<EOF
@@ -2017,6 +2287,7 @@ HOP_END=${hop_end}
 PASSWORD=${password}
 SNI=${sni}
 SERVER_IP=${server_ip}
+SERVER_IPV6=${server_ipv6}
 INSTALL_DATE="$(date '+%Y-%m-%d %H:%M:%S')"
 EOF
     log_info "Hysteria 2 安装信息已保存"
@@ -2177,6 +2448,8 @@ show_status() {
 
     if [[ -f "${INSTALL_INFO}" ]]; then
         source "${INSTALL_INFO}"
+        [[ -n "${SERVER_IP:-}" ]] && echo -e "  IPv4:     ${CYAN}${SERVER_IP}${NC}"
+        [[ -n "${SERVER_IPV6:-}" ]] && echo -e "  IPv6:     ${CYAN}${SERVER_IPV6}${NC}"
         echo -e "  安装时间: ${INSTALL_DATE}"
     fi
 
@@ -2206,31 +2479,73 @@ show_info() {
     # 直连模式信息
     if [[ "$mode" == "direct" ]]; then
         local port="${PORT:-${SERVER_PORT:-443}}"
-        local reality_link="vless://${UUID}@${SERVER_IP}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#Xray-Reality"
+        local has_v4=false
+        local has_v6=false
+        [[ -n "${SERVER_IP:-}" && "${SERVER_IP}" != "<YOUR_SERVER_IP>" ]] && has_v4=true
+        [[ -n "${SERVER_IPV6:-}" ]] && has_v6=true
+
+        local reality_link_v4=""
+        local reality_link_v6=""
+        if [[ "$has_v4" == "true" ]]; then
+            reality_link_v4="vless://${UUID}@${SERVER_IP}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#Xray-Reality-IPv4"
+            [[ "$has_v6" != "true" ]] && reality_link_v4="vless://${UUID}@${SERVER_IP}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#Xray-Reality"
+        fi
+        if [[ "$has_v6" == "true" ]]; then
+            # IPv6 必须使用中括号包裹 [${SERVER_IPV6}]
+            reality_link_v6="vless://${UUID}@[${SERVER_IPV6}]:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#Xray-Reality-IPv6"
+            [[ "$has_v4" != "true" ]] && reality_link_v6="vless://${UUID}@[${SERVER_IPV6}]:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#Xray-Reality"
+        fi
 
         echo ""
         echo -e "${GREEN}[直连模式 - VLESS + Reality (TCP)]${NC}"
         echo ""
-        echo -e "  ${BLUE}地址:${NC}   ${SERVER_IP}"
-        echo -e "  ${BLUE}端口:${NC}   ${port}"
-        echo -e "  ${BLUE}UUID:${NC}   ${UUID}"
-        echo -e "  ${BLUE}密钥:${NC}   ${PUBLIC_KEY}"
-        echo -e "  ${BLUE}SNI:${NC}    ${SNI}"
-        echo -e "  ${BLUE}Flow:${NC}   xtls-rprx-vision"
-        echo -e "  ${BLUE}SID:${NC}    ${SHORT_ID}"
-        echo ""
-        echo -e "${CYAN}--------------------------------------------${NC}"
-        echo -e "${GREEN}分享链接:${NC}"
-        echo ""
-        echo -e "${reality_link}"
+        [[ "$has_v4" == "true" ]] && echo -e "  ${BLUE}地址 (IPv4):${NC}  ${SERVER_IP}"
+        [[ "$has_v6" == "true" ]] && echo -e "  ${BLUE}地址 (IPv6):${NC}  [${SERVER_IPV6}]"
+        echo -e "  ${BLUE}端口:${NC}         ${port}"
+        echo -e "  ${BLUE}UUID:${NC}         ${UUID}"
+        echo -e "  ${BLUE}密钥:${NC}         ${PUBLIC_KEY}"
+        echo -e "  ${BLUE}SNI:${NC}          ${SNI}"
+        echo -e "  ${BLUE}Flow:${NC}         xtls-rprx-vision"
+        echo -e "  ${BLUE}SID:${NC}          ${SHORT_ID}"
         echo ""
 
-        # 生成二维码（如果 qrencode 可用）
-        if command -v qrencode &>/dev/null; then
+        if [[ "$has_v4" == "true" && "$has_v6" == "true" ]]; then
             echo -e "${CYAN}--------------------------------------------${NC}"
-            echo -e "${GREEN}二维码:${NC}"
+            echo -e "${GREEN}IPv4 节点分享链接:${NC}"
+            echo -e "${reality_link_v4}"
             echo ""
-            qrencode -t ANSIUTF8 "${reality_link}"
+            echo -e "${GREEN}IPv6 节点分享链接:${NC}"
+            echo -e "${reality_link_v6}"
+            echo ""
+            if command -v qrencode &>/dev/null; then
+                echo -e "${CYAN}--------------------------------------------${NC}"
+                echo -e "${GREEN}IPv4 二维码:${NC}"
+                qrencode -t ANSIUTF8 "${reality_link_v4}"
+                echo ""
+                echo -e "${CYAN}--------------------------------------------${NC}"
+                echo -e "${GREEN}IPv6 二维码:${NC}"
+                qrencode -t ANSIUTF8 "${reality_link_v6}"
+            fi
+        elif [[ "$has_v6" == "true" ]]; then
+            echo -e "${CYAN}--------------------------------------------${NC}"
+            echo -e "${GREEN}IPv6 节点分享链接:${NC}"
+            echo -e "${reality_link_v6}"
+            echo ""
+            if command -v qrencode &>/dev/null; then
+                echo -e "${CYAN}--------------------------------------------${NC}"
+                echo -e "${GREEN}IPv6 二维码:${NC}"
+                qrencode -t ANSIUTF8 "${reality_link_v6}"
+            fi
+        else
+            echo -e "${CYAN}--------------------------------------------${NC}"
+            echo -e "${GREEN}分享链接:${NC}"
+            echo -e "${reality_link_v4}"
+            echo ""
+            if command -v qrencode &>/dev/null; then
+                echo -e "${CYAN}--------------------------------------------${NC}"
+                echo -e "${GREEN}二维码:${NC}"
+                qrencode -t ANSIUTF8 "${reality_link_v4}"
+            fi
         fi
     fi
 
@@ -2246,31 +2561,72 @@ show_info() {
             hop_desc="${HOP_START}-${HOP_END}"
         fi
 
-        local hy2_link="hysteria2://${PASSWORD}@${SERVER_IP}:${port}/?insecure=1&sni=${sni}${mport_param}#Hysteria2"
+        local has_v4=false
+        local has_v6=false
+        [[ -n "${SERVER_IP:-}" && "${SERVER_IP}" != "<YOUR_SERVER_IP>" ]] && has_v4=true
+        [[ -n "${SERVER_IPV6:-}" ]] && has_v6=true
+
+        local hy2_link_v4=""
+        local hy2_link_v6=""
+        if [[ "$has_v4" == "true" ]]; then
+            hy2_link_v4="hysteria2://${PASSWORD}@${SERVER_IP}:${port}/?insecure=1&sni=${sni}${mport_param}#Hysteria2-IPv4"
+            [[ "$has_v6" != "true" ]] && hy2_link_v4="hysteria2://${PASSWORD}@${SERVER_IP}:${port}/?insecure=1&sni=${sni}${mport_param}#Hysteria2"
+        fi
+        if [[ "$has_v6" == "true" ]]; then
+            hy2_link_v6="hysteria2://${PASSWORD}@[${SERVER_IPV6}]:${port}/?insecure=1&sni=${sni}${mport_param}#Hysteria2-IPv6"
+            [[ "$has_v4" != "true" ]] && hy2_link_v6="hysteria2://${PASSWORD}@[${SERVER_IPV6}]:${port}/?insecure=1&sni=${sni}${mport_param}#Hysteria2"
+        fi
 
         echo ""
         echo -e "${GREEN}[极速抗封锁模式 - Hysteria 2 (UDP)]${NC}"
         echo ""
-        echo -e "  ${BLUE}地址:${NC}       ${SERVER_IP}"
-        echo -e "  ${BLUE}主端口:${NC}     ${port} (UDP)"
-        echo -e "  ${BLUE}端口跳跃:${NC}   ${hop_desc}"
-        echo -e "  ${BLUE}认证密码:${NC}   ${PASSWORD}"
-        echo -e "  ${BLUE}伪装 SNI:${NC}   ${sni}"
-        echo -e "  ${BLUE}传输协议:${NC}   UDP / QUIC"
-        echo -e "  ${BLUE}证书校验:${NC}   允许不安全 (Insecure / Skip-cert-verify: true)"
-        echo ""
-        echo -e "${CYAN}--------------------------------------------${NC}"
-        echo -e "${GREEN}分享链接:${NC}"
-        echo ""
-        echo -e "${hy2_link}"
+        [[ "$has_v4" == "true" ]] && echo -e "  ${BLUE}地址 (IPv4):${NC}  ${SERVER_IP}"
+        [[ "$has_v6" == "true" ]] && echo -e "  ${BLUE}地址 (IPv6):${NC}  [${SERVER_IPV6}]"
+        echo -e "  ${BLUE}主端口:${NC}       ${port} (UDP)"
+        echo -e "  ${BLUE}端口跳跃:${NC}     ${hop_desc}"
+        echo -e "  ${BLUE}认证密码:${NC}     ${PASSWORD}"
+        echo -e "  ${BLUE}伪装 SNI:${NC}     ${sni}"
+        echo -e "  ${BLUE}传输协议:${NC}     UDP / QUIC"
+        echo -e "  ${BLUE}证书校验:${NC}     允许不安全 (Insecure / Skip-cert-verify: true)"
         echo ""
 
-        # 生成二维码（如果 qrencode 可用）
-        if command -v qrencode &>/dev/null; then
+        if [[ "$has_v4" == "true" && "$has_v6" == "true" ]]; then
             echo -e "${CYAN}--------------------------------------------${NC}"
-            echo -e "${GREEN}二维码:${NC}"
+            echo -e "${GREEN}IPv4 节点分享链接:${NC}"
+            echo -e "${hy2_link_v4}"
             echo ""
-            qrencode -t ANSIUTF8 "${hy2_link}"
+            echo -e "${GREEN}IPv6 节点分享链接:${NC}"
+            echo -e "${hy2_link_v6}"
+            echo ""
+            if command -v qrencode &>/dev/null; then
+                echo -e "${CYAN}--------------------------------------------${NC}"
+                echo -e "${GREEN}IPv4 二维码:${NC}"
+                qrencode -t ANSIUTF8 "${hy2_link_v4}"
+                echo ""
+                echo -e "${CYAN}--------------------------------------------${NC}"
+                echo -e "${GREEN}IPv6 二维码:${NC}"
+                qrencode -t ANSIUTF8 "${hy2_link_v6}"
+            fi
+        elif [[ "$has_v6" == "true" ]]; then
+            echo -e "${CYAN}--------------------------------------------${NC}"
+            echo -e "${GREEN}IPv6 节点分享链接:${NC}"
+            echo -e "${hy2_link_v6}"
+            echo ""
+            if command -v qrencode &>/dev/null; then
+                echo -e "${CYAN}--------------------------------------------${NC}"
+                echo -e "${GREEN}IPv6 二维码:${NC}"
+                qrencode -t ANSIUTF8 "${hy2_link_v6}"
+            fi
+        else
+            echo -e "${CYAN}--------------------------------------------${NC}"
+            echo -e "${GREEN}分享链接:${NC}"
+            echo -e "${hy2_link_v4}"
+            echo ""
+            if command -v qrencode &>/dev/null; then
+                echo -e "${CYAN}--------------------------------------------${NC}"
+                echo -e "${GREEN}二维码:${NC}"
+                qrencode -t ANSIUTF8 "${hy2_link_v4}"
+            fi
         fi
     fi
 
@@ -2292,13 +2648,18 @@ show_info() {
         echo -e "  ${BLUE}证书:${NC}   ${CERT_FILE}"
         echo -e "  ${BLUE}私钥:${NC}   ${KEY_FILE}"
         echo ""
-        echo -e "${YELLOW}Cloudflare 配置:${NC}"
-        echo -e "  1. 添加 A 记录指向 ${SERVER_IP}"
-        echo -e "  2. 开启橙色云朵（代理）"
-        echo -e "  3. SSL/TLS 设置为 Full（不选 Strict）"
+        echo -e "${YELLOW}Cloudflare DNS 配置指引:${NC}"
+        if [[ -n "${SERVER_IP:-}" && "${SERVER_IP}" != "<YOUR_SERVER_IP>" ]]; then
+            echo -e "  • 添加 A 记录指向 IPv4:     ${CYAN}${SERVER_IP}${NC}"
+        fi
+        if [[ -n "${SERVER_IPV6:-}" ]]; then
+            echo -e "  • 添加 AAAA 记录指向 IPv6:   ${CYAN}${SERVER_IPV6}${NC} (支持双栈/纯IPv6源站接入)"
+        fi
+        echo -e "  • 开启橙色云朵（Proxied 代理隐藏源站）"
+        echo -e "  • SSL/TLS 加密模式设置为: Full (开启自定义 Origin CA 证书)"
         echo ""
         echo -e "${CYAN}--------------------------------------------${NC}"
-        echo -e "${GREEN}CDN 分享链接:${NC}"
+        echo -e "${GREEN}CDN 分享链接 (全网自适应 IPv4/IPv6 访问):${NC}"
         echo ""
         echo -e "${cdn_link}"
         echo ""
@@ -2347,10 +2708,19 @@ show_menu() {
     local mode_name="无"
     local port_info="无"
     local dest_info="无"
+    local ip_info="无"
 
     if [[ -f "${INSTALL_INFO}" ]]; then
         # shellcheck disable=SC1090
         source "${INSTALL_INFO}"
+        if [[ -n "${SERVER_IP:-}" && -n "${SERVER_IPV6:-}" ]]; then
+            ip_info="${SERVER_IP} / [${SERVER_IPV6}]"
+        elif [[ -n "${SERVER_IPV6:-}" ]]; then
+            ip_info="[${SERVER_IPV6}]"
+        elif [[ -n "${SERVER_IP:-}" ]]; then
+            ip_info="${SERVER_IP}"
+        fi
+
         if [[ "${DEPLOY_MODE:-}" == "hysteria" ]]; then
             core_name="Hysteria 2"
             mode_name="极速模式 (UDP/QUIC)"
@@ -2376,6 +2746,7 @@ show_menu() {
     echo -e "  服务状态: [ ${status_text} ]"
     echo -e "  核心程序: ${CYAN}${core_name}${NC}"
     echo -e "  部署模式: ${CYAN}${mode_name}${NC}"
+    echo -e "  服务器IP: ${CYAN}${ip_info}${NC}"
     echo -e "  监听端口: ${CYAN}${port_info}${NC}"
     [[ -n "$dest_info" && "$dest_info" != "无" ]] && echo -e "  伪装目标: ${CYAN}${dest_info}${NC}"
     echo -e "${CYAN}--------------------------------------------${NC}"
@@ -2421,7 +2792,7 @@ show_usage() {
     echo "用法: $0 <命令>"
     echo ""
     echo "命令:"
-    echo "  install     安装节点服务并生成配置"
+    echo "  install     安装节点服务并生成配置 (支持 IPv4/IPv6 自适应与双栈部署)"
     echo "              支持三种模式："
     echo "                1. 直连模式 (VLESS + Reality) - TCP 极简伪装"
     echo "                2. 极速模式 (Hysteria 2) - UDP 弱网加速/端口跳跃"
@@ -2432,7 +2803,7 @@ show_usage() {
     echo "  restart     重启服务"
     echo "  update      更新核心程序"
     echo "  bbr         开启 BBR 拥塞控制"
-    echo "  icmp        开启 ICMP (允许 ping)"
+    echo "  icmp        开启 ICMP (允许 ping) 与双栈网络优化"
     echo "  help        显示此帮助信息"
     echo ""
 }
@@ -2469,12 +2840,18 @@ main() {
             local port
             port=$(get_reality_port)
             check_port "$port" "tcp"
+
+            local ips
+            ips=$(configure_server_ips)
             local server_ip
-            server_ip=$(get_server_ip)
+            local server_ipv6
+            server_ip=$(echo "$ips" | cut -d'|' -f1)
+            server_ipv6=$(echo "$ips" | cut -d'|' -f2)
+
             local reality_sni
-            reality_sni=$(get_reality_domain "$server_ip")
+            reality_sni=$(get_reality_domain "$server_ip" "$server_ipv6")
             install_xray
-            generate_config "$mode" "" "$port" "$reality_sni"
+            generate_config "$mode" "" "$port" "$reality_sni" "$server_ip" "$server_ipv6"
             configure_firewall "$port" "tcp"
             install_service
             show_info
@@ -2487,7 +2864,6 @@ main() {
             local hop_end
             local password
             local sni
-            local server_ip
 
             port=$(echo "$hy_settings" | cut -d'|' -f1)
             enable_hop=$(echo "$hy_settings" | cut -d'|' -f2)
@@ -2495,7 +2871,13 @@ main() {
             hop_end=$(echo "$hy_settings" | cut -d'|' -f4)
             password=$(echo "$hy_settings" | cut -d'|' -f5)
             sni=$(echo "$hy_settings" | cut -d'|' -f6)
-            server_ip=$(get_server_ip)
+
+            local ips
+            ips=$(configure_server_ips)
+            local server_ip
+            local server_ipv6
+            server_ip=$(echo "$ips" | cut -d'|' -f1)
+            server_ipv6=$(echo "$ips" | cut -d'|' -f2)
 
             check_port "$port" "udp"
             install_hysteria
@@ -2510,7 +2892,7 @@ main() {
                 cleanup_all_port_hopping
             fi
 
-            save_hysteria_info "$port" "$enable_hop" "$hop_start" "$hop_end" "$password" "$sni" "$server_ip"
+            save_hysteria_info "$port" "$enable_hop" "$hop_start" "$hop_end" "$password" "$sni" "$server_ip" "$server_ipv6"
             install_hysteria_service
             show_info
         elif [[ "$mode" == "cdn" ]]; then
@@ -2518,8 +2900,16 @@ main() {
             domain=$(get_domain)
             local port="443"
             check_port "$port" "tcp"
+
+            local ips
+            ips=$(configure_server_ips)
+            local server_ip
+            local server_ipv6
+            server_ip=$(echo "$ips" | cut -d'|' -f1)
+            server_ipv6=$(echo "$ips" | cut -d'|' -f2)
+
             install_xray
-            generate_config "$mode" "$domain" "$port"
+            generate_config "$mode" "$domain" "$port" "" "$server_ip" "$server_ipv6"
             configure_firewall "$port" "tcp"
             install_service
             show_info
